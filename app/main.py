@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, func
 from sqlalchemy.orm import Session
 from .config import settings, ROOT, reload_runtime_settings, data_path
 from .db import Base, engine, Session as DbSession
@@ -52,9 +52,10 @@ async def scheduler():
                     post.status=PostStatus.PUBLISHED; attempt.status="PUBLISHED"; attempt.meta_media_id=media_id
                     # A processed file belongs to a single post. Only remove it after
                     # Meta confirmed publication; failed posts keep their files for retry.
-                    media_path=data_path(media.relative_path)
-                    media_path.unlink(missing_ok=True)
-                    media.status="Publicado (arquivo descartado)"
+                    other_uses=s.scalar(select(func.count()).select_from(ScheduledPost).where(ScheduledPost.processed_media_id==media.id,ScheduledPost.id!=post.id,ScheduledPost.status.not_in([PostStatus.PUBLISHED,PostStatus.CANCELLED,PostStatus.SKIPPED]))) or 0
+                    if not other_uses:
+                        data_path(media.relative_path).unlink(missing_ok=True)
+                        media.status="Publicado (arquivo descartado)"
                     if link and cover:
                         data_path(cover.relative_path).unlink(missing_ok=True)
                 except Exception as exc:
