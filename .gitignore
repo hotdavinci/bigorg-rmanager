@@ -1,0 +1,13 @@
+# Dados privados e arquivos gerados: nunca publicar no GitHub.
+.env
+.venv/
+data/
+frontend/node_modules/
+frontend/dist/
+tools/cloudflared
+tools/cloudflared.exe
+__pycache__/
+*.py[cod]
+*.egg-info/
+.vercel/
+vercel-oauth-callback/.vercel/
