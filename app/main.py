@@ -1,4 +1,4 @@
-import asyncio, shutil, uuid, secrets, os, sys, subprocess, json
+import asyncio, shutil, uuid, secrets, os, sys, subprocess, json, threading
 from contextlib import asynccontextmanager
 from datetime import datetime, date, time, timedelta
 import random
@@ -424,8 +424,11 @@ def schedule(campaign_id:int,body:ScheduleIn,s:Session=Depends(db)):
     if not m or m.kind!="processed": raise HTTPException(422,"Uma publicação exige mídia processada")
     x=ScheduledPost(campaign_id=campaign_id,**body.model_dump()); s.add(x); c.status=CampaignStatus.SCHEDULE_GENERATED; s.commit(); return {"id":x.id}
 @app.post("/api/campaigns/{campaign_id}/generate-schedule")
-def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(db)):
+def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(db),background_claim:bool=False):
     c=s.get(Campaign,campaign_id)
+    # The background endpoint reserves the campaign as PROCESSING before this worker starts.
+    if background_claim and c and c.status==CampaignStatus.PROCESSING:
+        c.status=CampaignStatus.READY_TO_SCHEDULE; s.commit()
     if not c or c.status not in (CampaignStatus.DRAFT,CampaignStatus.PROCESSING_FAILED,CampaignStatus.READY_TO_SCHEDULE): raise HTTPException(409,"Esta campanha não pode gerar uma nova agenda agora")
     if body.days<1 or body.days>366 or not body.intervals: raise HTTPException(422,"Informe dias e ao menos um intervalo")
     accounts=list(s.scalars(select(CampaignAccount.account_id).where(CampaignAccount.campaign_id==campaign_id)))
@@ -490,6 +493,20 @@ def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(
         s.rollback()
         c=s.get(Campaign,campaign_id); c.status=CampaignStatus.PROCESSING_FAILED; s.commit()
         raise HTTPException(422,f"O processamento falhou antes de concluir a agenda: {exc}")
+def run_schedule_background(campaign_id:int,body:GenerateScheduleIn):
+    with DbSession() as session:
+        try: generate_schedule(campaign_id,body,session,True)
+        except Exception: pass
+@app.post("/api/campaigns/{campaign_id}/start-generation")
+def start_generation(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(db)):
+    campaign=s.get(Campaign,campaign_id)
+    allowed=(CampaignStatus.DRAFT,CampaignStatus.PROCESSING_FAILED,CampaignStatus.READY_TO_SCHEDULE)
+    if not campaign or campaign.status not in allowed: raise HTTPException(409,"Campaign is already processing or cannot be scheduled")
+    if body.days<1 or body.days>366 or not body.intervals: raise HTTPException(422,"Inform days and at least one interval")
+    account_count=s.scalar(select(func.count()).select_from(CampaignAccount).where(CampaignAccount.campaign_id==campaign_id)) or 0
+    campaign.status=CampaignStatus.PROCESSING; s.commit()
+    threading.Thread(target=run_schedule_background,args=(campaign_id,body),daemon=True,name=f"schedule-{campaign_id}").start()
+    return {"accepted":True,"status":CampaignStatus.PROCESSING,"count":account_count*body.days*len(body.intervals)}
 @app.post("/api/campaigns/{campaign_id}/activate")
 def activate(campaign_id:int,s:Session=Depends(db)):
     c=s.get(Campaign,campaign_id)

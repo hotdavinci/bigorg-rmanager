@@ -7,10 +7,13 @@ import './library.css';
 
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
 const apiUrl = (path: string) => `${apiBaseUrl}/api${path}`;
-const api = (path: string, options?: RequestInit) => fetch(apiUrl(path), { credentials: 'include', ...options }).then(async response => {
+const api = (path: string, options?: RequestInit) => {
+  const effectivePath=path.endsWith('/generate-schedule') && options?.method==='POST' ? path.replace('/generate-schedule','/start-generation') : path;
+  return fetch(apiUrl(effectivePath), { credentials: 'include', ...options }).then(async response => {
   if (!response.ok) throw new Error(await response.text());
   return response.json();
-});
+  });
+};
 const pages = [['Início', Home], ['Biblioteca', Library], ['Contas', Users], ['Campanhas', Play], ['Agenda', CalendarDays], ['Histórico', History], ['Configurações', Settings]] as const;
 const pagePaths:Record<string,string> = {'Início':'/','Biblioteca':'/biblioteca','Contas':'/contas','Campanhas':'/campanhas','Agenda':'/agenda','Histórico':'/historico','Configurações':'/configuracoes'};
 
