@@ -20,6 +20,11 @@ const localDate = () => {
   return now.toISOString().slice(0, 10);
 };
 const statusLabel = (status: string) => ({ PENDING: 'AGENDADO', CLAIMED: 'INICIANDO', UPLOADING: 'ENVIANDO', WAITING_META: 'PROCESSANDO NA META', PUBLISHING: 'PUBLICANDO', PUBLISHED: 'PUBLICADO', FAILED: 'FALHOU', SKIPPED: 'PULADO', CANCELLED: 'CANCELADO', PAUSED: 'PAUSADO' }[status] || status);
+const defaultCampaignName = (start:string, days:number, intervals:string[], models:number[]) => {
+  const first=new Date(`${start}T12:00:00`); const last=new Date(first); last.setDate(last.getDate()+Math.max(1,days)-1);
+  const fmt=(value:Date)=>`${String(value.getDate()).padStart(2,'0')}/${String(value.getMonth()+1).padStart(2,'0')}`;
+  return `${fmt(first)}-${fmt(last)} · ${intervals.length} mídia(s)/dia · ${models.length} modelo(s)`;
+};
 
 function App() {
   const location = useLocation();
@@ -41,7 +46,7 @@ function App() {
   const [coverPath, setCoverPath] = useState(''); const [coverName, setCoverName] = useState('');
   const [tunnel, setTunnel] = useState<any>({});
   const [notice, setNotice] = useState('');
-  const [campaignOpen, setCampaignOpen] = useState(false);
+  const [campaignOpen, setCampaignOpenState] = useState(false);
   const [campaignName, setCampaignName] = useState('');
   const [campaignDescription, setCampaignDescription] = useState('');
   const [creating, setCreating] = useState(false);
@@ -60,6 +65,7 @@ function App() {
   const [scheduleIntervals, setScheduleIntervals] = useState('11:00-13:00');
   const [scheduleStrategy, setScheduleStrategy] = useState('sequential');
   const [scheduleRanges, setScheduleRanges] = useState<string[]>(['11:00-13:00']);
+  const setCampaignOpen = (open:boolean) => { if(open) { const ranges=defaults.intervals||['11:00-13:00']; const models=defaults.script_ids||[]; const days=Number(defaults.days||7); const start=localDate(); setSetupAccounts([]); setSetupMedia([]); setSetupScripts(models); setScheduleStart(start); setScheduleRanges(ranges); setScheduleDays(String(days)); setScheduleStrategy(defaults.strategy||'sequential'); setCoverPath(defaults.cover_path||''); setCoverName(defaults.cover_path?'Capa padrão selecionada':''); setCaptionListId(defaults.caption_list_id||null); setCaptionText(defaults.caption_text||''); setCampaignName(defaultCampaignName(start,days,ranges,models)); setCampaignDescription(''); } setCampaignOpenState(open); };
   const refresh = () => { api('/dashboard').then(setDashboard); api('/meta/accounts').then(setAccounts); api('/media').then(setMedia); api('/campaigns').then(setCampaigns); api('/scripts').then(setScripts); api('/caption-lists').then(setCaptionLists); api('/campaign-defaults').then(setDefaults); api('/scheduled-posts').then(setAgenda); api('/activity').then(setActivity); api('/activity/summary').then(setActivitySummary); api('/tunnel/status').then(setTunnel); };
   useEffect(refresh, []);
   useEffect(() => { const timer = window.setInterval(refresh, 5000); return () => window.clearInterval(timer); }, []);
