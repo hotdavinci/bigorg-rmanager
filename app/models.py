@@ -30,6 +30,9 @@ class Campaign(Base):
 class CaptionList(Base):
     __tablename__="caption_lists"
     id: Mapped[int]=mapped_column(primary_key=True); name: Mapped[str]=mapped_column(String(255)); items_json: Mapped[str]=mapped_column(Text, default="[]"); relative_path: Mapped[str]=mapped_column(String(500), default=""); created_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
+class ApplicationSetting(Base):
+    __tablename__="application_settings"
+    key: Mapped[str]=mapped_column(String(100),primary_key=True); value: Mapped[str]=mapped_column(Text,default="")
 class CampaignAccount(Base):
     __tablename__="campaign_accounts"; __table_args__=(UniqueConstraint("campaign_id","account_id",name="uq_campaign_account"),)
     id: Mapped[int]=mapped_column(primary_key=True); campaign_id: Mapped[int]=mapped_column(ForeignKey("campaigns.id")); account_id: Mapped[int]=mapped_column(ForeignKey("instagram_accounts.id"))

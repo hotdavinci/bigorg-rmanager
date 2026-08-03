@@ -13,7 +13,7 @@ from sqlalchemy import select, delete, func
 from sqlalchemy.orm import Session
 from .config import settings, ROOT, reload_runtime_settings, data_path
 from .db import Base, engine, Session as DbSession
-from .models import Media, Script, Campaign, CampaignStatus, ScheduledPost, PostStatus, InstagramAccount, OAuthState, CampaignAccount, CampaignSourceMedia, CampaignScript, ProcessingExecution, CampaignScheduleRule, ProcessedCover, ScheduledPostCover, PublicationAttempt, CaptionList
+from .models import Media, Script, Campaign, CampaignStatus, ScheduledPost, PostStatus, InstagramAccount, OAuthState, CampaignAccount, CampaignSourceMedia, CampaignScript, ProcessingExecution, CampaignScheduleRule, ProcessedCover, ScheduledPostCover, PublicationAttempt, CaptionList, ApplicationSetting
 from .services import dirs, copy_media, process, process_slot
 from . import meta
 from .tunnel import tunnel
@@ -107,6 +107,7 @@ class CampaignSetupIn(BaseModel): account_ids:list[int]; source_ids:list[int]; s
 class ProcessIn(BaseModel): source_ids:list[int]
 class ScheduleIn(BaseModel): account_id:int; processed_media_id:int; caption:str=""; scheduled_for:datetime; position:int=0
 class GenerateScheduleIn(BaseModel): start_date:date; days:int; intervals:list[str]; strategy:str="sequential"
+class CampaignDefaultsIn(BaseModel): intervals:list[str]=["11:00-13:00"]; days:int=7; strategy:str="sequential"; script_ids:list[int]=[]; cover_path:str=""; caption_list_id:int|None=None; caption_text:str=""
 class LoginIn(BaseModel): email:str; password:str
 @app.get("/api/auth/status")
 def auth_status(request:Request): return {"authenticated":request.session.get("user")==settings.admin_email,"email":settings.admin_email}
@@ -154,6 +155,13 @@ async def oauth_callback(code:str|None=None,state:str|None=None,error:str|None=N
 def remove_account(account_id:int,s:Session=Depends(db)):
     item=s.get(InstagramAccount,account_id)
     if not item: raise HTTPException(404,"Conta não encontrada")
+    campaign_ids=list(s.scalars(select(CampaignAccount.campaign_id).where(CampaignAccount.account_id==account_id)))
+    s.query(ScheduledPost).filter(ScheduledPost.account_id==account_id,ScheduledPost.status.in_([PostStatus.PENDING,PostStatus.CLAIMED,PostStatus.PAUSED])).update({ScheduledPost.status:PostStatus.CANCELLED},synchronize_session=False)
+    s.execute(delete(CampaignAccount).where(CampaignAccount.account_id==account_id))
+    for campaign_id in campaign_ids:
+        if not s.scalar(select(func.count()).select_from(CampaignAccount).where(CampaignAccount.campaign_id==campaign_id)):
+            campaign=s.get(Campaign,campaign_id)
+            if campaign and campaign.status==CampaignStatus.ACTIVE: campaign.status=CampaignStatus.PAUSED
     s.delete(item);s.commit();return {"ok":True}
 @app.get("/api/dashboard")
 def dashboard(s:Session=Depends(db)):
@@ -209,6 +217,23 @@ def activity_summary(s:Session=Depends(db)):
         "pending": s.query(ScheduledPost).filter_by(status=PostStatus.PENDING).count(),
         "failed": s.query(ScheduledPost).filter_by(status=PostStatus.FAILED).count(),
     }
+@app.delete("/api/activity")
+def clear_history(s:Session=Depends(db)):
+    finished=[PostStatus.PUBLISHED,PostStatus.FAILED,PostStatus.SKIPPED,PostStatus.CANCELLED]
+    post_ids=select(ScheduledPost.id).where(ScheduledPost.status.in_(finished))
+    s.execute(delete(PublicationAttempt).where(PublicationAttempt.post_id.in_(post_ids)))
+    s.execute(delete(ScheduledPostCover).where(ScheduledPostCover.post_id.in_(post_ids)))
+    s.execute(delete(ScheduledPost).where(ScheduledPost.status.in_(finished)))
+    s.execute(delete(ProcessingExecution))
+    s.commit()
+    # Discard only processed files that no longer belong to a future post.
+    for media in list(s.scalars(select(Media).where(Media.kind=="processed"))):
+        if not s.scalar(select(func.count()).select_from(ScheduledPost).where(ScheduledPost.processed_media_id==media.id)):
+            data_path(media.relative_path).unlink(missing_ok=True); s.delete(media)
+    for cover in list(s.scalars(select(ProcessedCover))):
+        if not s.scalar(select(func.count()).select_from(ScheduledPostCover).where(ScheduledPostCover.cover_id==cover.id)):
+            data_path(cover.relative_path).unlink(missing_ok=True); s.delete(cover)
+    s.commit(); return {"ok":True}
 @app.post("/api/scheduled-posts/{post_id}/retry-now")
 def retry_post_now(post_id:int,s:Session=Depends(db)):
     post=s.get(ScheduledPost,post_id); campaign=s.get(Campaign,post.campaign_id) if post else None
@@ -239,6 +264,12 @@ async def import_campaign_cover(file:UploadFile=File(...)):
     return {"path":str(target.relative_to(settings.data_dir)),"name":Path(file.filename or "capa").name}
 @app.get("/api/caption-lists")
 def caption_lists(s:Session=Depends(db)): return [{"id":x.id,"nome":x.name,"quantidade":len(json.loads(x.items_json))} for x in s.scalars(select(CaptionList))]
+@app.delete("/api/caption-lists/{list_id}")
+def remove_caption_list(list_id:int,s:Session=Depends(db)):
+    item=s.get(CaptionList,list_id)
+    if not item: raise HTTPException(404,"Lista de legendas não encontrada")
+    s.query(Campaign).filter(Campaign.caption_list_id==list_id).update({Campaign.caption_list_id:None},synchronize_session=False)
+    data_path(item.relative_path).unlink(missing_ok=True); s.delete(item); s.commit(); return {"ok":True}
 @app.post("/api/caption-lists/import")
 async def import_caption_list(file:UploadFile=File(...),s:Session=Depends(db)):
     try: raw=json.loads((await file.read()).decode("utf-8-sig"))
@@ -253,6 +284,29 @@ async def import_caption_list(file:UploadFile=File(...),s:Session=Depends(db)):
     x=CaptionList(name=Path(file.filename or "legendas").stem,items_json=json.dumps(items,ensure_ascii=False),relative_path=str(path.relative_to(settings.data_dir))); s.add(x); s.commit(); return {"id":x.id,"nome":x.name,"quantidade":len(items)}
 @app.get("/api/scripts")
 def scripts(s:Session=Depends(db)): return [{"id":x.id,"nome":x.name,"ativo":x.active,"descricao":x.description} for x in s.scalars(select(Script))]
+@app.delete("/api/scripts/{script_id}")
+def remove_script(script_id:int,s:Session=Depends(db)):
+    item=s.get(Script,script_id)
+    if not item: raise HTTPException(404,"Script não encontrado")
+    campaign_ids=list(s.scalars(select(CampaignScript.campaign_id).where(CampaignScript.script_id==script_id)))
+    s.execute(delete(CampaignScript).where(CampaignScript.script_id==script_id))
+    s.execute(delete(ProcessingExecution).where(ProcessingExecution.script_id==script_id))
+    for campaign_id in campaign_ids:
+        if not s.scalar(select(func.count()).select_from(CampaignScript).where(CampaignScript.campaign_id==campaign_id)):
+            campaign=s.get(Campaign,campaign_id)
+            if campaign and campaign.status==CampaignStatus.ACTIVE: campaign.status=CampaignStatus.PAUSED
+    data_path(item.relative_path).unlink(missing_ok=True); s.delete(item); s.commit(); return {"ok":True}
+@app.get("/api/campaign-defaults")
+def campaign_defaults(s:Session=Depends(db)):
+    item=s.get(ApplicationSetting,"campaign_defaults")
+    if not item: return CampaignDefaultsIn().model_dump()
+    try: return CampaignDefaultsIn.model_validate_json(item.value).model_dump()
+    except Exception: return CampaignDefaultsIn().model_dump()
+@app.put("/api/campaign-defaults")
+def save_campaign_defaults(body:CampaignDefaultsIn,s:Session=Depends(db)):
+    if body.days<1 or body.days>366 or not body.intervals: raise HTTPException(422,"Informe os dias e ao menos um intervalo")
+    item=s.get(ApplicationSetting,"campaign_defaults") or ApplicationSetting(key="campaign_defaults")
+    item.value=body.model_dump_json(); s.add(item); s.commit(); return body.model_dump()
 @app.post("/api/scripts/import")
 async def import_script(file:UploadFile=File(...),s:Session=Depends(db)):
     if Path(file.filename or "").suffix.lower()!=".py": raise HTTPException(400,"Envie um arquivo .py")
