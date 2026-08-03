@@ -4,7 +4,7 @@ from datetime import datetime, date, time, timedelta
 import random
 from pathlib import Path
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from .config import settings, ROOT, reload_runtime_settings, data_path
 from .db import Base, engine, Session as DbSession
 from .models import Media, Script, Campaign, CampaignStatus, ScheduledPost, PostStatus, InstagramAccount, OAuthState, CampaignAccount, CampaignSourceMedia, CampaignScript, ProcessingExecution, CampaignScheduleRule, ProcessedCover, ScheduledPostCover, PublicationAttempt, CaptionList, ApplicationSetting
-from .services import dirs, copy_media, process, process_slot
+from .services import dirs, copy_media, process, process_slot, thumbnail
 from . import meta
 from .tunnel import tunnel
 from .media_gateway import media_app
@@ -245,7 +245,25 @@ def retry_post_now(post_id:int,s:Session=Depends(db)):
 @app.get("/api/media")
 def media(kind:str|None=None,s:Session=Depends(db)):
     q=select(Media); q=q.where(Media.kind==kind) if kind else q
-    return [{"id":m.id,"nome":m.original_name,"tipo":m.kind,"status":m.status,"tamanho":m.size,"caminho":m.relative_path,"original_media_id":m.original_media_id} for m in s.scalars(q.order_by(Media.created_at.desc()))]
+    return [{"id":m.id,"nome":m.original_name,"tipo":m.kind,"status":m.status,"tamanho":m.size,"caminho":m.relative_path,"original_media_id":m.original_media_id,"thumbnail_url":f"/api/media/{m.id}/thumbnail"} for m in s.scalars(q.order_by(Media.created_at.desc()))]
+@app.get("/api/media/{media_id}/thumbnail")
+def media_thumbnail(media_id:int,s:Session=Depends(db)):
+    item=s.get(Media,media_id)
+    if not item: raise HTTPException(404,"Mídia não encontrada")
+    image=thumbnail(item)
+    if not image: raise HTTPException(404,"Não foi possível gerar a miniatura")
+    return FileResponse(image,media_type="image/jpeg")
+@app.delete("/api/media/{media_id}")
+def remove_media(media_id:int,s:Session=Depends(db)):
+    item=s.get(Media,media_id)
+    if not item: raise HTTPException(404,"Mídia não encontrada")
+    if s.scalar(select(func.count()).select_from(CampaignSourceMedia).where(CampaignSourceMedia.media_id==media_id)):
+        raise HTTPException(409,"Remova esta mídia das campanhas antes de excluí-la")
+    if s.scalar(select(func.count()).select_from(ScheduledPost).where(ScheduledPost.processed_media_id==media_id,ScheduledPost.status.in_([PostStatus.PENDING,PostStatus.CLAIMED,PostStatus.UPLOADING]))):
+        raise HTTPException(409,"Esta mídia está em uma publicação pendente")
+    data_path(item.relative_path).unlink(missing_ok=True)
+    (settings.data_dir/"media/thumbnails"/f"{item.sha256}.jpg").unlink(missing_ok=True)
+    s.delete(item); s.commit(); return {"ok":True}
 @app.post("/api/media/import")
 async def import_media(files:list[UploadFile]=File(...),s:Session=Depends(db)):
     result=[]
@@ -253,7 +271,7 @@ async def import_media(files:list[UploadFile]=File(...),s:Session=Depends(db)):
         suffix=Path(f.filename or "").suffix.lower()
         if suffix not in {".mp4",".mov"}: raise HTTPException(400,"Apenas MP4 e MOV")
         temp=settings.data_dir/f".{uuid.uuid4().hex}{suffix}"; temp.parent.mkdir(exist_ok=True); temp.write_bytes(await f.read())
-        try: m=copy_media(temp); s.add(m); s.flush(); result.append(m.id)
+        try: m=copy_media(temp,Path(f.filename or "vídeo").name); s.add(m); s.flush(); thumbnail(m); result.append(m.id)
         finally: temp.unlink(missing_ok=True)
     s.commit(); return {"ids":result}
 @app.post("/api/campaign-covers/import")

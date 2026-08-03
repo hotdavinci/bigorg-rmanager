@@ -13,10 +13,19 @@ def sha(path: Path):
     return h.hexdigest()
 def dirs():
     for p in (settings.data_dir/"media/original", settings.data_dir/"media/processed", settings.data_dir/"media/covers", settings.data_dir/"media/thumbnails", settings.data_dir/"scripts", settings.data_dir/"captions", settings.data_dir/"workspaces"): p.mkdir(parents=True, exist_ok=True)
-def copy_media(src: Path):
+def thumbnail(media: Media) -> Path|None:
+    source=data_path(media.relative_path)
+    if not source.is_file(): return None
+    dirs(); target=settings.data_dir/"media/thumbnails"/f"{media.sha256}.jpg"
+    if target.is_file(): return target
+    try:
+        run=subprocess.run([shutil.which("ffmpeg") or "ffmpeg","-y","-ss","0","-i",str(source),"-frames:v","1","-vf","scale=480:-2",str(target)],capture_output=True,timeout=45)
+        return target if run.returncode==0 and target.is_file() else None
+    except (OSError,subprocess.TimeoutExpired): return None
+def copy_media(src: Path, original_name: str|None=None):
     if src.suffix.lower() not in MEDIA_EXT: raise ValueError("Apenas .mp4 e .mov são aceitos")
     dirs(); stored=f"{uuid.uuid4().hex}{src.suffix.lower()}"; dst=settings.data_dir/"media/original"/stored; shutil.copy2(src,dst)
-    return Media(original_name=src.name, stored_name=stored, relative_path=str(dst.relative_to(settings.data_dir)), kind="original", extension=src.suffix.lower(), size=dst.stat().st_size, sha256=sha(dst))
+    return Media(original_name=original_name or src.name, stored_name=stored, relative_path=str(dst.relative_to(settings.data_dir)), kind="original", extension=src.suffix.lower(), size=dst.stat().st_size, sha256=sha(dst))
 def process(session, campaign_id: int, source_ids: list[int]):
     c=session.get(Campaign,campaign_id)
     scripts=list(session.scalars(select(Script).join(CampaignScript, CampaignScript.script_id==Script.id).where(CampaignScript.campaign_id==campaign_id).order_by(CampaignScript.position)))
