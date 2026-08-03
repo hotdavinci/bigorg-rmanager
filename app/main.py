@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, date, time, timedelta
 import random
 from pathlib import Path
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, Body
 from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
@@ -253,6 +253,10 @@ def retry_post_now(post_id:int,s:Session=Depends(db)):
 def media(kind:str|None=None,s:Session=Depends(db)):
     q=select(Media); q=q.where(Media.kind==kind) if kind else q
     return [{"id":m.id,"nome":m.original_name,"tipo":m.kind,"status":m.status,"tamanho":m.size,"caminho":m.relative_path,"original_media_id":m.original_media_id,"thumbnail_url":f"/api/media/{m.id}/thumbnail"} for m in s.scalars(q.order_by(Media.created_at.desc()))]
+@app.post("/api/media/refresh-thumbnails")
+def refresh_media_thumbnails(s:Session=Depends(db)):
+    items=list(s.scalars(select(Media).where(Media.kind=="original")))
+    return {"ok":True,"generated":sum(1 for item in items if thumbnail(item,force=True)),"total":len(items)}
 @app.get("/api/media/{media_id}/thumbnail")
 def media_thumbnail(media_id:int,s:Session=Depends(db)):
     item=s.get(Media,media_id)
@@ -271,6 +275,24 @@ def remove_media(media_id:int,s:Session=Depends(db)):
     data_path(item.relative_path).unlink(missing_ok=True)
     (settings.data_dir/"media/thumbnails"/f"{item.sha256}.jpg").unlink(missing_ok=True)
     s.delete(item); s.commit(); return {"ok":True}
+@app.delete("/api/media")
+def remove_media_bulk(media_ids:list[int]=Body(...),s:Session=Depends(db)):
+    ids=list(dict.fromkeys(media_ids))
+    if not ids: raise HTTPException(400,"Select at least one media file")
+    deleted=[]; skipped=[]; files=[]
+    active_statuses=[PostStatus.PENDING,PostStatus.CLAIMED,PostStatus.UPLOADING,PostStatus.WAITING_META,PostStatus.PUBLISHING]
+    for media_id in ids:
+        item=s.get(Media,media_id)
+        if not item: skipped.append({"id":media_id,"reason":"Media not found"}); continue
+        in_campaign=s.scalar(select(func.count()).select_from(CampaignSourceMedia).where(CampaignSourceMedia.media_id==media_id))
+        in_post=s.scalar(select(func.count()).select_from(ScheduledPost).where(ScheduledPost.processed_media_id==media_id,ScheduledPost.status.in_(active_statuses)))
+        if in_campaign or in_post:
+            skipped.append({"id":media_id,"reason":"Protected by a campaign or pending post"}); continue
+        files.extend([data_path(item.relative_path),settings.data_dir/"media/thumbnails"/f"{item.sha256}.jpg"])
+        s.delete(item); deleted.append(media_id)
+    s.commit()
+    for file in files: file.unlink(missing_ok=True)
+    return {"deleted":deleted,"skipped":skipped}
 @app.post("/api/media/import")
 async def import_media(files:list[UploadFile]=File(...),s:Session=Depends(db)):
     result=[]

@@ -13,13 +13,15 @@ def sha(path: Path):
     return h.hexdigest()
 def dirs():
     for p in (settings.data_dir/"media/original", settings.data_dir/"media/processed", settings.data_dir/"media/covers", settings.data_dir/"media/thumbnails", settings.data_dir/"scripts", settings.data_dir/"captions", settings.data_dir/"workspaces"): p.mkdir(parents=True, exist_ok=True)
-def thumbnail(media: Media) -> Path|None:
+def thumbnail(media: Media, force: bool=False) -> Path|None:
     source=data_path(media.relative_path)
     if not source.is_file(): return None
     dirs(); target=settings.data_dir/"media/thumbnails"/f"{media.sha256}.jpg"
-    if target.is_file(): return target
+    if target.is_file() and not force: return target
+    if force: target.unlink(missing_ok=True)
     try:
-        run=subprocess.run([shutil.which("ffmpeg") or "ffmpeg","-y","-ss","0","-i",str(source),"-frames:v","1","-vf","scale=480:-2",str(target)],capture_output=True,timeout=45)
+        # The 0:00 frame is frequently black because of fade-ins or codec keyframes.
+        run=subprocess.run([shutil.which("ffmpeg") or "ffmpeg","-y","-ss","1","-i",str(source),"-frames:v","1","-vf","scale=480:-2",str(target)],capture_output=True,timeout=45)
         return target if run.returncode==0 and target.is_file() else None
     except (OSError,subprocess.TimeoutExpired): return None
 def copy_media(src: Path, original_name: str|None=None):
