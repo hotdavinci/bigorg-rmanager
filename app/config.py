@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     meta_graph_base_url: str = "https://graph.instagram.com"
     python_executable: str = "python"
     processing_timeout_seconds: int = 1800
+    # Um lote reduz a quantidade de inícios do Python/ffmpeg, sem encher o disco
+    # com a campanha inteira de uma vez. Pode ser ajustado no .env da VPS.
+    processing_batch_size: int = 12
     admin_email: str = "hotdavinci@gmail.com"
     admin_password: str = ""
     campaign_cover_path: str = ""
@@ -46,5 +49,5 @@ def data_path(relative_path: str | Path) -> Path:
 def reload_runtime_settings() -> None:
     """Rele o .env sem interromper o servidor local."""
     updated = Settings()
-    for field in ("app_encryption_key", "meta_app_id", "meta_instagram_app_id", "meta_instagram_app_secret", "meta_app_secret", "meta_redirect_uri", "meta_graph_api_version", "meta_oauth_authorize_url", "meta_oauth_token_url", "meta_graph_base_url", "python_executable", "processing_timeout_seconds", "admin_email", "admin_password", "campaign_cover_path", "cloudflared_path", "tunnel_media_port", "public_media_base_url", "cors_allowed_origins", "session_https_only"):
+    for field in ("app_encryption_key", "meta_app_id", "meta_instagram_app_id", "meta_instagram_app_secret", "meta_app_secret", "meta_redirect_uri", "meta_graph_api_version", "meta_oauth_authorize_url", "meta_oauth_token_url", "meta_graph_base_url", "python_executable", "processing_timeout_seconds", "processing_batch_size", "admin_email", "admin_password", "campaign_cover_path", "cloudflared_path", "tunnel_media_port", "public_media_base_url", "cors_allowed_origins", "session_https_only"):
         setattr(settings, field, getattr(updated, field))

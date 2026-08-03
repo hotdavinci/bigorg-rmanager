@@ -103,3 +103,64 @@ def process_slot(session, campaign_id: int, source_id: int, slot_key: str):
         ctarget=cdir/f"{uuid.uuid4().hex}{final_cover.suffix.lower()}"; shutil.copy2(final_cover,ctarget)
         cover_result=(str(ctarget.relative_to(settings.data_dir)),sha(ctarget))
     return media, cover_result
+
+def process_slots_batch(session, campaign_id: int, slots: list[dict]):
+    """Processa várias cópias independentes na mesma workspace.
+
+    Cada post recebe nomes com um identificador próprio. Assim, mesmo quando uma
+    fonte se repete para contas diferentes, o arquivo resultante nunca é compartilhado.
+    Scripts que varrem todos os arquivos da pasta rodam apenas uma vez por lote.
+    """
+    campaign=session.get(Campaign,campaign_id)
+    scripts=list(session.scalars(select(Script).join(CampaignScript, CampaignScript.script_id==Script.id).where(CampaignScript.campaign_id==campaign_id).order_by(CampaignScript.position)))
+    cover_source=data_path(campaign.cover_path) if campaign and campaign.cover_path else None
+    if not campaign or not scripts or not slots: raise ValueError("Campanha, scripts ou lote não encontrados")
+    if cover_source and not cover_source.is_file(): raise ValueError("A capa selecionada não existe mais")
+    batch_id=f"batch-{uuid.uuid4().hex}"
+    work=settings.data_dir/"workspaces"/str(campaign_id)/batch_id
+    work.mkdir(parents=True,exist_ok=False)
+    before={}; inputs=[]
+    for index, slot in enumerate(slots):
+        source=session.get(Media,slot["source_id"])
+        if not source or source.kind!="original": raise ValueError("Mídia original não encontrada")
+        token=f"post{index:03d}_{slot['slot_key'][-8:]}"
+        video=work/f"{token}__video{source.extension.lower()}"
+        shutil.copy2(data_path(source.relative_path),video); before[video.name]=sha(video)
+        cover_name=None
+        if cover_source:
+            cover_name=f"{token}__cover{cover_source.suffix.lower()}"
+            cover=work/cover_name; shutil.copy2(cover_source,cover); before[cover.name]=sha(cover)
+        inputs.append({"slot":slot,"source":source,"token":token,"cover_name":cover_name})
+    for script in scripts:
+        script_file=data_path(script.relative_path); local_script=work/script_file.name; shutil.copy2(script_file,local_script)
+        execution=ProcessingExecution(campaign_id=campaign_id,script_id=script.id,workspace=str(work.relative_to(settings.data_dir)))
+        session.add(execution); session.flush()
+        try:
+            run=subprocess.run([settings.python_executable,local_script.name],cwd=work,capture_output=True,text=True,encoding="utf-8",errors="replace",env={**os.environ,"PYTHONIOENCODING":"utf-8"},timeout=settings.processing_timeout_seconds)
+            execution.stdout=run.stdout[-20000:]; execution.stderr=run.stderr[-20000:]; execution.exit_code=run.returncode; execution.finished_at=datetime.utcnow(); execution.status="SUCCESS" if run.returncode==0 else "FAILED"
+            if run.returncode: raise RuntimeError(f"O script {script.name} falhou no lote")
+        except Exception as exc:
+            execution.status="FAILED"; execution.stderr=(execution.stderr+"\n"+str(exc))[-20000:]; execution.finished_at=datetime.utcnow(); raise
+    changed_videos=[p for p in work.iterdir() if p.is_file() and p.suffix.lower() in MEDIA_EXT and (p.name not in before or sha(p)!=before[p.name])]
+    changed_covers=[p for p in work.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXT and (p.name not in before or sha(p)!=before[p.name])]
+    if len(changed_videos)<len(inputs): raise RuntimeError(f"O lote gerou {len(changed_videos)} vídeos para {len(inputs)} posts")
+    used_videos=set(); used_covers=set(); results=[]
+    fallback_videos=iter(sorted(changed_videos,key=lambda p:p.name))
+    fallback_covers=iter(sorted(changed_covers,key=lambda p:p.name))
+    for item in inputs:
+        matches=[p for p in changed_videos if item["token"] in p.name and p not in used_videos]
+        final_video=matches[0] if matches else next((p for p in fallback_videos if p not in used_videos),None)
+        if not final_video: raise RuntimeError("Não foi possível relacionar o resultado processado ao post")
+        used_videos.add(final_video)
+        slot_key=item["slot"]["slot_key"]; outdir=settings.data_dir/"media/processed"/str(campaign_id)/slot_key; outdir.mkdir(parents=True,exist_ok=True)
+        target=outdir/f"{uuid.uuid4().hex}{final_video.suffix.lower()}"; shutil.copy2(final_video,target)
+        media=Media(original_name=final_video.name,stored_name=target.name,relative_path=str(target.relative_to(settings.data_dir)),kind="processed",extension=target.suffix.lower(),size=target.stat().st_size,sha256=sha(target),status="Processada",original_media_id=item["source"].id)
+        session.add(media); session.flush(); cover_result=None
+        if cover_source:
+            cover_matches=[p for p in changed_covers if item["token"] in p.name and p not in used_covers]
+            final_cover=cover_matches[0] if cover_matches else next((p for p in fallback_covers if p not in used_covers),None)
+            if not final_cover: raise RuntimeError("Não foi possível relacionar a capa processada ao post")
+            used_covers.add(final_cover); cdir=settings.data_dir/"media/covers"/str(campaign_id)/slot_key; cdir.mkdir(parents=True,exist_ok=True)
+            ctarget=cdir/f"{uuid.uuid4().hex}{final_cover.suffix.lower()}"; shutil.copy2(final_cover,ctarget); cover_result=(str(ctarget.relative_to(settings.data_dir)),sha(ctarget))
+        results.append((item["slot"],media,cover_result))
+    return results

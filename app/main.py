@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from .config import settings, ROOT, reload_runtime_settings, data_path
 from .db import Base, engine, Session as DbSession
 from .models import Media, Script, Campaign, CampaignStatus, ScheduledPost, PostStatus, InstagramAccount, OAuthState, CampaignAccount, CampaignSourceMedia, CampaignScript, ProcessingExecution, CampaignScheduleRule, ProcessedCover, ScheduledPostCover, PublicationAttempt, CaptionList, ApplicationSetting
-from .services import dirs, copy_media, process, process_slot, thumbnail
+from .services import dirs, copy_media, process, process_slot, process_slots_batch, thumbnail
 from . import meta
 from .tunnel import tunnel
 from .media_gateway import media_app
@@ -112,6 +112,22 @@ class ScheduleIn(BaseModel): account_id:int; processed_media_id:int; caption:str
 class GenerateScheduleIn(BaseModel): start_date:date; days:int; intervals:list[str]; strategy:str="sequential"
 class CampaignDefaultsIn(BaseModel): intervals:list[str]=["11:00-13:00"]; days:int=7; strategy:str="sequential"; script_ids:list[int]=[]; cover_path:str=""; caption_list_id:int|None=None; caption_text:str=""
 class LoginIn(BaseModel): email:str; password:str
+
+def progress_file(campaign_id:int) -> Path:
+    return settings.data_dir/"workspaces"/str(campaign_id)/"generation-progress.json"
+
+def save_generation_progress(campaign_id:int, **values):
+    """Progresso fora do SQLite: ele aparece mesmo durante a transação longa."""
+    path=progress_file(campaign_id); path.parent.mkdir(parents=True,exist_ok=True)
+    payload={"campaign_id":campaign_id,"updated_at":datetime.utcnow().isoformat(),**values}
+    temporary=path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    temporary.write_text(json.dumps(payload,ensure_ascii=False),encoding="utf-8")
+    temporary.replace(path)
+
+def load_generation_progress(campaign_id:int):
+    path=progress_file(campaign_id)
+    try: return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+    except (OSError,json.JSONDecodeError): return None
 @app.get("/api/auth/status")
 def auth_status(request:Request): return {"authenticated":request.session.get("user")==settings.admin_email,"email":settings.admin_email}
 @app.post("/api/auth/login")
@@ -386,8 +402,13 @@ def campaigns(s:Session=Depends(db)):
     result=[]
     for x in s.scalars(select(Campaign)):
         rule=s.scalar(select(CampaignScheduleRule).where(CampaignScheduleRule.campaign_id==x.id))
-        result.append({"id":x.id,"nome":x.name,"status":x.status,"cover_path":x.cover_path,"caption_list_id":x.caption_list_id,"caption_text":x.caption_text,"script_ids":list(s.scalars(select(CampaignScript.script_id).where(CampaignScript.campaign_id==x.id).order_by(CampaignScript.position))),"account_ids":list(s.scalars(select(CampaignAccount.account_id).where(CampaignAccount.campaign_id==x.id))),"source_ids":list(s.scalars(select(CampaignSourceMedia.media_id).where(CampaignSourceMedia.campaign_id==x.id))),"schedule":{"start_date":rule.start_date,"days":rule.days,"intervals":rule.intervals.split(","),"strategy":rule.strategy} if rule else None})
+        result.append({"id":x.id,"nome":x.name,"status":x.status,"progress":load_generation_progress(x.id),"cover_path":x.cover_path,"caption_list_id":x.caption_list_id,"caption_text":x.caption_text,"script_ids":list(s.scalars(select(CampaignScript.script_id).where(CampaignScript.campaign_id==x.id).order_by(CampaignScript.position))),"account_ids":list(s.scalars(select(CampaignAccount.account_id).where(CampaignAccount.campaign_id==x.id))),"source_ids":list(s.scalars(select(CampaignSourceMedia.media_id).where(CampaignSourceMedia.campaign_id==x.id))),"schedule":{"start_date":rule.start_date,"days":rule.days,"intervals":rule.intervals.split(","),"strategy":rule.strategy} if rule else None})
     return result
+@app.get("/api/campaigns/{campaign_id}/progress")
+def campaign_progress(campaign_id:int,s:Session=Depends(db)):
+    campaign=s.get(Campaign,campaign_id)
+    if not campaign: raise HTTPException(404,"Campanha não encontrada")
+    return load_generation_progress(campaign_id) or {"campaign_id":campaign_id,"status":campaign.status,"completed":0,"total":0}
 @app.post("/api/campaigns")
 def create_campaign(body:CampaignIn,s:Session=Depends(db)):
     x=Campaign(**body.model_dump()); s.add(x); s.commit(); return {"id":x.id,"status":x.status}
@@ -463,52 +484,64 @@ def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(
     s.execute(delete(ScheduledPostCover).where(ScheduledPostCover.post_id.in_(post_ids)))
     s.execute(delete(ScheduledPost).where(ScheduledPost.campaign_id==campaign_id))
     c.status=CampaignStatus.PROCESSING; s.commit()
+    # Primeiro montamos as ocorrências. A mídia ainda é original neste ponto;
+    # a agenda só recebe registros depois de o lote devolver cada resultado validado.
     ordered=sources[:]
     if body.strategy=="random": random.shuffle(ordered)
-    index=0; position=0; previous_caption_by_account={}
+    index=0; position=0; previous_caption_by_account={}; jobs=[]
+    for day_offset in range(body.days):
+        current=body.start_date+timedelta(days=day_offset)
+        if current<date.today(): continue
+        for start,end in ranges:
+            low=start.hour*60+start.minute; high=end.hour*60+end.minute
+            for account_id in accounts:
+                if current==date.today():
+                    earliest=datetime.now()+timedelta(minutes=5)
+                    if high < earliest.hour*60+earliest.minute: continue
+                source_id=random.choice(sources) if body.strategy=="random" else ordered[index%len(ordered)]
+                index+=1
+                if c.caption_text: caption=c.caption_text
+                elif caption_items:
+                    choices=[text for text in caption_items if text!=previous_caption_by_account.get(account_id)] or caption_items
+                    caption=random.choice(choices); previous_caption_by_account[account_id]=caption
+                else: caption=""
+                jobs.append({"slot_key":f"slot-{uuid.uuid4().hex}","source_id":source_id,"account_id":account_id,"current":current,"low":low,"high":high,"caption":caption})
+    batch_size=max(1,min(settings.processing_batch_size,50))
+    save_generation_progress(campaign_id,status="RUNNING",total=len(jobs),completed=0,scheduled=0,failed=0,batch_size=batch_size,message="Preparando os lotes de vídeos...",started_at=datetime.utcnow().isoformat())
+    scheduled=0
     try:
-        for day_offset in range(body.days):
-            current=body.start_date+timedelta(days=day_offset)
-            # Never generate new posts for a date that has already ended.
-            if current<date.today(): continue
-            for start,end in ranges:
-                low=start.hour*60+start.minute; high=end.hour*60+end.minute
-                for account_id in accounts:
-                    # Skip an interval that has fully elapsed today before wasting a processing run.
-                    if current==date.today():
-                        earliest=datetime.now()+timedelta(minutes=5)
-                        if high < earliest.hour*60+earliest.minute: continue
-                    source_id=random.choice(sources) if body.strategy=="random" else ordered[index%len(ordered)]
-                    index+=1
-                    if c.caption_text: caption=c.caption_text
-                    elif caption_items:
-                        choices=[text for text in caption_items if text!=previous_caption_by_account.get(account_id)] or caption_items
-                        caption=random.choice(choices); previous_caption_by_account[account_id]=caption
-                    else: caption=""
-                    # No processed file is ever shared: this call executes the full
-                    # script chain in a unique workspace for this exact occurrence.
-                    media, cover_data=process_slot(s,campaign_id,source_id,f"slot-{uuid.uuid4().hex}")
-                    # Processing can take time. Pick the final random time only now so it is
-                    # guaranteed not to be in the past when the post enters the agenda.
-                    effective_low=low
-                    if current==date.today():
-                        earliest=datetime.now()+timedelta(minutes=5)
-                        effective_low=max(low,earliest.hour*60+earliest.minute)
-                    if effective_low>high:
-                        data_path(media.relative_path).unlink(missing_ok=True); s.delete(media)
-                        if cover_data: data_path(cover_data[0]).unlink(missing_ok=True)
-                        continue
-                    minute=random.randint(effective_low,high); when=datetime.combine(current,time(minute//60,minute%60))
-                    post=ScheduledPost(campaign_id=campaign_id,account_id=account_id,processed_media_id=media.id,caption=caption,scheduled_for=when,position=position)
-                    s.add(post); s.flush()
-                    if cover_data:
-                        cover=ProcessedCover(campaign_id=campaign_id,original_media_id=source_id,post_id=post.id,relative_path=cover_data[0],sha256=cover_data[1])
-                        s.add(cover); s.flush(); s.add(ScheduledPostCover(post_id=post.id,cover_id=cover.id))
-                    position+=1
-        c.status=CampaignStatus.ACTIVE; s.commit(); return {"count":position,"status":c.status}
+        for first in range(0,len(jobs),batch_size):
+            batch=jobs[first:first+batch_size]
+            names=[s.get(Media,item["source_id"]).original_name for item in batch]
+            save_generation_progress(campaign_id,status="RUNNING",total=len(jobs),completed=first,scheduled=scheduled,failed=0,batch_size=batch_size,current_batch=f"{first+1}-{first+len(batch)}",current_media=names[0] if names else "",message=f"Processando lote {first//batch_size+1} com {len(batch)} vídeos...")
+            # Cada item mantém uma cópia e uma saída exclusiva, embora o script
+            # seja iniciado uma vez para o lote inteiro.
+            results=process_slots_batch(s,campaign_id,batch)
+            for job,media,cover_data in results:
+                effective_low=job["low"]
+                if job["current"]==date.today():
+                    earliest=datetime.now()+timedelta(minutes=5)
+                    effective_low=max(job["low"],earliest.hour*60+earliest.minute)
+                if effective_low>job["high"]:
+                    data_path(media.relative_path).unlink(missing_ok=True); s.delete(media)
+                    if cover_data: data_path(cover_data[0]).unlink(missing_ok=True)
+                    continue
+                minute=random.randint(effective_low,job["high"]); when=datetime.combine(job["current"],time(minute//60,minute%60))
+                post=ScheduledPost(campaign_id=campaign_id,account_id=job["account_id"],processed_media_id=media.id,caption=job["caption"],scheduled_for=when,position=position)
+                s.add(post); s.flush()
+                if cover_data:
+                    cover=ProcessedCover(campaign_id=campaign_id,original_media_id=job["source_id"],post_id=post.id,relative_path=cover_data[0],sha256=cover_data[1])
+                    s.add(cover); s.flush(); s.add(ScheduledPostCover(post_id=post.id,cover_id=cover.id))
+                position+=1; scheduled+=1
+            save_generation_progress(campaign_id,status="RUNNING",total=len(jobs),completed=first+len(batch),scheduled=scheduled,failed=0,batch_size=batch_size,current_batch=f"{first+1}-{first+len(batch)}",message="Lote validado; preparando o próximo...")
+        c.status=CampaignStatus.ACTIVE; s.commit()
+        save_generation_progress(campaign_id,status="COMPLETED",total=len(jobs),completed=len(jobs),scheduled=scheduled,failed=0,batch_size=batch_size,message=f"Concluído: {scheduled} posts agendados.",finished_at=datetime.utcnow().isoformat())
+        return {"count":position,"status":c.status}
     except Exception as exc:
         s.rollback()
         c=s.get(Campaign,campaign_id); c.status=CampaignStatus.PROCESSING_FAILED; s.commit()
+        prior=load_generation_progress(campaign_id) or {}
+        save_generation_progress(campaign_id,status="FAILED",total=prior.get("total",0),completed=prior.get("completed",0),scheduled=prior.get("scheduled",0),failed=1,batch_size=prior.get("batch_size",batch_size),message="O processamento parou com erro.",error=str(exc)[:2000],finished_at=datetime.utcnow().isoformat())
         raise HTTPException(422,f"O processamento falhou antes de concluir a agenda: {exc}")
 def run_schedule_background(campaign_id:int,body:GenerateScheduleIn):
     with DbSession() as session:
