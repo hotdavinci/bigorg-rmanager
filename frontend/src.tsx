@@ -115,14 +115,19 @@ function App() {
   const removeAccount = (account:any) => setDeleteModal({...account,action:'account',nome:`@${account.username||account.nome}`});
   const openAccountReels = () => {
     const targets=selectedAccounts.length?accounts.filter(account=>selectedAccounts.includes(account.id)):accounts;
-    // Links reais com alvo diferente: o Chrome os trata como abas, não como a
-    // mesma janela de popup que acabava sendo reaproveitada.
+    let opened=0;
     targets.forEach(account=>{
       const username=(account.username||account.nome||'').replace(/^@/,''); if(!username) return;
-      const link=document.createElement('a'); link.href=`https://instagram.com/${username}/reels`; link.target=`instagram_reels_${account.id}`; link.rel='noopener noreferrer'; link.style.display='none';
-      document.body.appendChild(link); link.click(); link.remove();
+      // Abrir primeiro uma aba vazia é tratado como ação direta do clique pelo
+      // navegador. Só depois ela é direcionada ao Instagram.
+      const tab=window.open('', `instagram_reels_${account.id}`);
+      if(!tab) return;
+      opened+=1;
+      tab.opener=null;
+      tab.location.replace(`https://instagram.com/${username}/reels`);
     });
-    if(targets.length>1) setNotice(`${targets.length} contas selecionadas: abrindo uma aba para cada uma.`);
+    if(opened<targets.length) setNotice(`O navegador bloqueou ${targets.length-opened} aba(s). Permita pop-ups para este site e tente novamente.`);
+    else if(targets.length>1) setNotice(`${opened} contas selecionadas: uma aba foi aberta para cada conta.`);
   };
   const removeSelectedAccounts = async () => { if(!deleteModal?.ids?.length)return; try { const result=await api('/meta/accounts',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify(deleteModal.ids)}); setDeleteModal(null); setSelectedAccounts([]); setNotice(`${result.removed.length} conta(s) removida(s).`); refresh(); } catch(error:any){setNotice(error.message);} };
   const removeScript = (script:any) => setDeleteModal({...script,action:'script'});
