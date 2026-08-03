@@ -1,6 +1,7 @@
 import React, { FormEvent, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { CalendarDays, CheckCircle2, Clock, Film, History, Home, Library, Play, Plus, Settings, Upload, Users, X } from 'lucide-react';
+import { BrowserRouter, useLocation, useNavigate } from 'react-router-dom';
 import './style.css';
 import './library.css';
 
@@ -11,6 +12,7 @@ const api = (path: string, options?: RequestInit) => fetch(apiUrl(path), { crede
   return response.json();
 });
 const pages = [['Início', Home], ['Biblioteca', Library], ['Contas', Users], ['Campanhas', Play], ['Agenda', CalendarDays], ['Histórico', History], ['Configurações', Settings]] as const;
+const pagePaths:Record<string,string> = {'Início':'/','Biblioteca':'/biblioteca','Contas':'/contas','Campanhas':'/campanhas','Agenda':'/agenda','Histórico':'/historico','Configurações':'/configuracoes'};
 
 const localDate = () => {
   const now = new Date();
@@ -20,7 +22,10 @@ const localDate = () => {
 const statusLabel = (status: string) => ({ PENDING: 'AGENDADO', CLAIMED: 'INICIANDO', UPLOADING: 'ENVIANDO', WAITING_META: 'PROCESSANDO NA META', PUBLISHING: 'PUBLICANDO', PUBLISHED: 'PUBLICADO', FAILED: 'FALHOU', SKIPPED: 'PULADO', CANCELLED: 'CANCELADO', PAUSED: 'PAUSADO' }[status] || status);
 
 function App() {
-  const [page, setPage] = useState('Início');
+  const location = useLocation();
+  const navigate = useNavigate();
+  const page = Object.entries(pagePaths).find(([,path]) => path === location.pathname)?.[0] || 'Início';
+  const setPage = (label:string) => navigate(pagePaths[label] || '/');
   const [dashboard, setDashboard] = useState<any>({});
   const [accounts, setAccounts] = useState<any[]>([]);
   const [media, setMedia] = useState<any[]>([]);
@@ -156,4 +161,4 @@ function CampaignDialog(p:any) {
 function ScheduleDialog({campaign,start,days,intervals,strategy,setStart,setDays,setIntervals,setStrategy,cancel,submit}:any) { return <div className="login-page"><form className="modal wide" onSubmit={submit}><div className="modal-title"><h2>Agendar: {campaign.nome}</h2><button type="button" className="icon-button" onClick={cancel}><X size={19}/></button></div><p>Somente vídeos já processados serão usados.</p><div className="schedule-grid"><label>Começar em<input type="date" value={start} onChange={e=>setStart(e.target.value)}/></label><label>Quantidade de dias<input type="number" min="1" max="366" value={days} onChange={e=>setDays(e.target.value)}/></label></div><label>Intervalos <small>Ex.: 11:00-13:00, 18:00-21:00</small><input value={intervals} onChange={e=>setIntervals(e.target.value)}/></label><label>Escolha das mídias<select value={strategy} onChange={e=>setStrategy(e.target.value)}><option value="sequential">Sequencial — usa todas e repete</option><option value="random">Aleatória</option></select></label><div className="modal-actions"><button type="button" className="secondary" onClick={cancel}>Cancelar</button><button className="primary">Gerar agenda</button></div></form></div>; }
 function DeleteDialog({campaign,cancel,confirm}:any) { const action=campaign.action; const content=action==='history'?['Limpar histórico?','Processamentos e posts finalizados serão removidos. Agendamentos pendentes serão preservados.','Limpar']:action==='media'?['Excluir mídia?','A mídia será removida do armazenamento. Mídias em campanhas ou posts pendentes são protegidas.','Excluir']:action==='account'?['Remover conta?','Os posts pendentes desta conta serão cancelados.','Remover']:action==='script'?['Excluir script?','Campanhas sem outro script serão pausadas.','Excluir']:action==='captions'?['Excluir lista de legendas?','Campanhas deixarão de usar esta lista.','Excluir']:action==='cancel'?['Cancelar campanha?',`“${campaign.nome}” será mantida no histórico, mas todos os agendamentos pendentes serão cancelados.`,'Cancelar']:['Excluir campanha?',`“${campaign.nome}” e seus agendamentos serão removidos.`,'Excluir']; return <div className="modal-backdrop"><div className="modal"><h2>{content[0]}</h2><p>{content[1]}</p><div className="modal-actions"><button className="secondary" onClick={cancel}>Voltar</button><button className="danger" onClick={confirm}>{content[2]}</button></div></div></div>; }
 function BulkDeleteDialog({count,cancel,confirm}:any) { return <div className="modal-backdrop"><div className="modal"><h2>Excluir mídias selecionadas?</h2><p>{count} mídia(s) serão removidas. As que estiverem em campanhas ou posts pendentes continuarão protegidas.</p><div className="modal-actions"><button className="secondary" onClick={cancel}>Voltar</button><button className="danger" onClick={confirm}>Excluir selecionadas</button></div></div></div>; }
-createRoot(document.getElementById('root')!).render(<App/>);
+createRoot(document.getElementById('root')!).render(<BrowserRouter><App/></BrowserRouter>);
