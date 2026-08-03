@@ -97,8 +97,11 @@ app.add_middleware(
 app.add_middleware(
     SessionMiddleware,
     secret_key=settings.app_encryption_key or "troque-a-chave-local",
-    max_age=60*60*24*30,
-    same_site="lax",
+    # Mantém o login mesmo após fechar o navegador ou reiniciar o painel.
+    max_age=60*60*24*180,
+    # O painel Vercel e a API da VPS estão em domínios HTTPS diferentes.
+    # Sem SameSite=None, o navegador descarta a sessão ao navegar/atualizar.
+    same_site="none" if settings.session_https_only else "lax",
     https_only=settings.session_https_only,
 )
 BUILD_ID = "oauth-instagram-login-20260731-2"
@@ -317,14 +320,19 @@ def remove_script(script_id:int,s:Session=Depends(db)):
 @app.get("/api/campaign-defaults")
 def campaign_defaults(s:Session=Depends(db)):
     item=s.get(ApplicationSetting,"campaign_defaults")
-    if not item: return CampaignDefaultsIn().model_dump()
-    try: return CampaignDefaultsIn.model_validate_json(item.value).model_dump()
-    except Exception: return CampaignDefaultsIn().model_dump()
+    try: payload=(CampaignDefaultsIn.model_validate_json(item.value).model_dump() if item else CampaignDefaultsIn().model_dump())
+    except Exception: payload=CampaignDefaultsIn().model_dump()
+    # O caminho Ã© o dado persistido; o nome Ã© apenas para a interface mostrar
+    # claramente que a capa continua selecionada depois de atualizar a tela.
+    payload["cover_name"]=Path(payload["cover_path"]).name if payload.get("cover_path") else ""
+    return payload
 @app.put("/api/campaign-defaults")
 def save_campaign_defaults(body:CampaignDefaultsIn,s:Session=Depends(db)):
     if body.days<1 or body.days>366 or not body.intervals: raise HTTPException(422,"Informe os dias e ao menos um intervalo")
     item=s.get(ApplicationSetting,"campaign_defaults") or ApplicationSetting(key="campaign_defaults")
-    item.value=body.model_dump_json(); s.add(item); s.commit(); return body.model_dump()
+    item.value=body.model_dump_json(); s.add(item); s.commit()
+    payload=body.model_dump(); payload["cover_name"]=Path(payload["cover_path"]).name if payload.get("cover_path") else ""
+    return payload
 @app.post("/api/scripts/import")
 async def import_script(file:UploadFile=File(...),s:Session=Depends(db)):
     if Path(file.filename or "").suffix.lower()!=".py": raise HTTPException(400,"Envie um arquivo .py")
