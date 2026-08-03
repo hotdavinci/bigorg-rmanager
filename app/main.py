@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlalchemy import select, delete, func
+from sqlalchemy import select, delete, func, text
 from sqlalchemy.orm import Session
 from .config import settings, ROOT, reload_runtime_settings, data_path
 from .db import Base, engine, Session as DbSession
@@ -225,6 +225,10 @@ def clear_history(s:Session=Depends(db)):
     finished=[PostStatus.PUBLISHED,PostStatus.FAILED,PostStatus.SKIPPED,PostStatus.CANCELLED]
     post_ids=select(ScheduledPost.id).where(ScheduledPost.status.in_(finished))
     s.execute(delete(PublicationAttempt).where(PublicationAttempt.post_id.in_(post_ids)))
+    # Databases created before per-post covers retain this legacy link table.
+    # It must be cleared first or SQLite correctly protects the posts from deletion.
+    legacy=s.execute(text("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduled_post_covers_legacy'")).scalar()
+    if legacy: s.execute(text("DELETE FROM scheduled_post_covers_legacy WHERE post_id IN (SELECT id FROM scheduled_posts WHERE status IN ('PUBLISHED','FAILED','SKIPPED','CANCELLED'))"))
     s.execute(delete(ScheduledPostCover).where(ScheduledPostCover.post_id.in_(post_ids)))
     s.execute(delete(ScheduledPost).where(ScheduledPost.status.in_(finished)))
     s.execute(delete(ProcessingExecution))
@@ -310,6 +314,7 @@ def remove_script(script_id:int,s:Session=Depends(db)):
     item=s.get(Script,script_id)
     if not item: raise HTTPException(404,"Script não encontrado")
     campaign_ids=list(s.scalars(select(CampaignScript.campaign_id).where(CampaignScript.script_id==script_id)))
+    s.query(Campaign).filter(Campaign.script_id==script_id).update({Campaign.script_id:None},synchronize_session=False)
     s.execute(delete(CampaignScript).where(CampaignScript.script_id==script_id))
     s.execute(delete(ProcessingExecution).where(ProcessingExecution.script_id==script_id))
     for campaign_id in campaign_ids:
