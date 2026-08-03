@@ -447,10 +447,15 @@ def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(
     try:
         for day_offset in range(body.days):
             current=body.start_date+timedelta(days=day_offset)
+            # Never generate new posts for a date that has already ended.
+            if current<date.today(): continue
             for start,end in ranges:
                 low=start.hour*60+start.minute; high=end.hour*60+end.minute
                 for account_id in accounts:
-                    minute=random.randint(low,high); when=datetime.combine(current,time(minute//60,minute%60))
+                    # Skip an interval that has fully elapsed today before wasting a processing run.
+                    if current==date.today():
+                        earliest=datetime.now()+timedelta(minutes=5)
+                        if high < earliest.hour*60+earliest.minute: continue
                     source_id=random.choice(sources) if body.strategy=="random" else ordered[index%len(ordered)]
                     index+=1
                     if c.caption_text: caption=c.caption_text
@@ -461,6 +466,17 @@ def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(
                     # No processed file is ever shared: this call executes the full
                     # script chain in a unique workspace for this exact occurrence.
                     media, cover_data=process_slot(s,campaign_id,source_id,f"slot-{uuid.uuid4().hex}")
+                    # Processing can take time. Pick the final random time only now so it is
+                    # guaranteed not to be in the past when the post enters the agenda.
+                    effective_low=low
+                    if current==date.today():
+                        earliest=datetime.now()+timedelta(minutes=5)
+                        effective_low=max(low,earliest.hour*60+earliest.minute)
+                    if effective_low>high:
+                        data_path(media.relative_path).unlink(missing_ok=True); s.delete(media)
+                        if cover_data: data_path(cover_data[0]).unlink(missing_ok=True)
+                        continue
+                    minute=random.randint(effective_low,high); when=datetime.combine(current,time(minute//60,minute%60))
                     post=ScheduledPost(campaign_id=campaign_id,account_id=account_id,processed_media_id=media.id,caption=caption,scheduled_for=when,position=position)
                     s.add(post); s.flush()
                     if cover_data:
