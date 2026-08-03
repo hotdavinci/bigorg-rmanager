@@ -154,6 +154,23 @@ async def oauth_callback(code:str|None=None,state:str|None=None,error:str|None=N
         s.commit()
         return HTMLResponse("<script>window.opener&&window.opener.location.reload();window.close()</script><h2>Conta conectada com sucesso.</h2><p>Você já pode fechar esta janela e voltar ao Reels Manager.</p>")
     except HTTPException as e: return HTMLResponse(f"<h2>Não foi possível conectar a conta.</h2><p>{e.detail}</p>",e.status_code)
+@app.delete("/api/meta/accounts")
+def remove_accounts_bulk(account_ids:list[int]=Body(...),s:Session=Depends(db)):
+    ids=list(dict.fromkeys(account_ids))
+    if not ids: raise HTTPException(400,"Select at least one account")
+    removed=[]; missing=[]
+    for account_id in ids:
+        item=s.get(InstagramAccount,account_id)
+        if not item: missing.append(account_id); continue
+        campaign_ids=list(s.scalars(select(CampaignAccount.campaign_id).where(CampaignAccount.account_id==account_id)))
+        s.query(ScheduledPost).filter(ScheduledPost.account_id==account_id,ScheduledPost.status.in_([PostStatus.PENDING,PostStatus.CLAIMED,PostStatus.PAUSED])).update({ScheduledPost.status:PostStatus.CANCELLED},synchronize_session=False)
+        s.execute(delete(CampaignAccount).where(CampaignAccount.account_id==account_id))
+        for campaign_id in campaign_ids:
+            if not s.scalar(select(func.count()).select_from(CampaignAccount).where(CampaignAccount.campaign_id==campaign_id)):
+                campaign=s.get(Campaign,campaign_id)
+                if campaign and campaign.status==CampaignStatus.ACTIVE: campaign.status=CampaignStatus.PAUSED
+        s.delete(item); removed.append(account_id)
+    s.commit(); return {"removed":removed,"missing":missing}
 @app.delete("/api/meta/accounts/{account_id}")
 def remove_account(account_id:int,s:Session=Depends(db)):
     item=s.get(InstagramAccount,account_id)
