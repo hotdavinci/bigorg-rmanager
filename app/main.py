@@ -220,7 +220,9 @@ def scheduled_posts(s:Session=Depends(db)):
 def activity(s:Session=Depends(db)):
     """Uma linha por post. Logs de scripts ficam nos detalhes da campanha, não poluem o histórico."""
     items=[]
-    posts=s.scalars(select(ScheduledPost).order_by(ScheduledPost.scheduled_for.desc()).limit(120)).all()
+    # Ordenamos depois de separar recentes e futuros. Limitar aqui antes da
+    # ordenação escondia os primeiros dias de campanhas maiores.
+    posts=s.scalars(select(ScheduledPost)).all()
     for post in posts:
         campaign=s.get(Campaign,post.campaign_id)
         account=s.get(InstagramAccount,post.account_id)
