@@ -70,6 +70,7 @@ function App() {
   useEffect(refresh, []);
   useEffect(() => { const timer = window.setInterval(refresh, 5000); return () => window.clearInterval(timer); }, []);
   useEffect(() => { api('/auth/status').then(result => setAuthenticated(result.authenticated)).catch(() => setAuthenticated(false)); }, []);
+  useEffect(() => { if(campaignOpen) setCampaignName(defaultCampaignName(scheduleStart,Number(scheduleDays)||1,scheduleRanges,setupScripts)); }, [campaignOpen,scheduleStart,scheduleDays,scheduleRanges,setupScripts]);
   const importMedia = async (event: React.ChangeEvent<HTMLInputElement>) => {
     if (!event.target.files?.length) return;
     const data = new FormData(); [...event.target.files].forEach(file => data.append('files', file));
