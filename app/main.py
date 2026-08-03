@@ -231,11 +231,16 @@ def activity(s:Session=Depends(db)):
             "title":f"@{account.username if account else 'conta removida'} · {media.original_name if media else 'Mídia removida'}",
             "campaign":campaign.name if campaign else "Campanha removida",
             "when":post.scheduled_for,
+            "sort_when":attempt.finished_at or attempt.created_at if attempt else post.scheduled_for,
             "media_name":media.original_name if media else "Mídia removida",
             "detail":attempt.message if attempt and attempt.message else (f"Publicado na Meta: {attempt.meta_media_id}" if attempt and attempt.meta_media_id else ""),
             "running":post.status in {PostStatus.CLAIMED,PostStatus.UPLOADING,PostStatus.WAITING_META,PostStatus.PUBLISHING},
         })
-    return items
+    # Histórico prioriza o que acabou de acontecer; agendados ficam depois,
+    # em ordem do próximo horário, para não esconder os publicados.
+    items.sort(key=lambda item: (item["status"]==PostStatus.PENDING, -(item["sort_when"] or item["when"]).timestamp() if item["status"]!=PostStatus.PENDING else item["when"].timestamp()))
+    for item in items: item.pop("sort_when",None)
+    return items[:100]
 @app.get("/api/activity/summary")
 def activity_summary(s:Session=Depends(db)):
     return {
