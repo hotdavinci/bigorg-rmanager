@@ -218,35 +218,24 @@ def scheduled_posts(s:Session=Depends(db)):
     return result
 @app.get("/api/activity")
 def activity(s:Session=Depends(db)):
-    """Recent processing and publication events, including the current run."""
+    """Uma linha por post. Logs de scripts ficam nos detalhes da campanha, não poluem o histórico."""
     items=[]
-    executions=s.scalars(select(ProcessingExecution).order_by(ProcessingExecution.id.desc()).limit(60)).all()
-    for execution in executions:
-        campaign=s.get(Campaign,execution.campaign_id); script=s.get(Script,execution.script_id)
-        detail=(execution.stderr or execution.stdout or "").strip()
+    posts=s.scalars(select(ScheduledPost).order_by(ScheduledPost.scheduled_for.desc()).limit(120)).all()
+    for post in posts:
+        campaign=s.get(Campaign,post.campaign_id)
+        account=s.get(InstagramAccount,post.account_id)
+        media=s.get(Media,post.processed_media_id)
+        attempt=s.scalar(select(PublicationAttempt).where(PublicationAttempt.post_id==post.id).order_by(PublicationAttempt.id.desc()))
         items.append({
-            "id":f"process-{execution.id}", "type":"PROCESSAMENTO", "status":execution.status,
-            "title":f"{campaign.name if campaign else 'Campanha removida'} · {script.name if script else 'Script removido'}",
-            "when":execution.finished_at or execution.started_at,
-            "detail":detail[-3000:],
-            "running":execution.status=="RUNNING",
-        })
-    attempts=s.scalars(select(PublicationAttempt).order_by(PublicationAttempt.id.desc()).limit(60)).all()
-    for attempt in attempts:
-        post=s.get(ScheduledPost,attempt.post_id)
-        campaign=s.get(Campaign,post.campaign_id) if post else None
-        account=s.get(InstagramAccount,post.account_id) if post else None
-        media=s.get(Media,post.processed_media_id) if post else None
-        items.append({
-            "id":f"publish-{attempt.id}", "type":"PUBLICAÇÃO", "status":attempt.status,
-            "title":f"{campaign.name if campaign else 'Campanha removida'} · @{account.username if account else 'conta removida'}",
-            "when":attempt.finished_at or attempt.created_at,
-            "scheduled_for":post.scheduled_for if post else None,
+            "id":f"post-{post.id}", "status":post.status,
+            "title":f"@{account.username if account else 'conta removida'} · {media.original_name if media else 'Mídia removida'}",
+            "campaign":campaign.name if campaign else "Campanha removida",
+            "when":post.scheduled_for,
             "media_name":media.original_name if media else "Mídia removida",
-            "detail":attempt.message or (f"Publicado na Meta: {attempt.meta_media_id}" if attempt.meta_media_id else "Enviando para a Meta..."),
-            "running":attempt.status in {"UPLOADING", "WAITING_META", "PUBLISHING"},
+            "detail":attempt.message if attempt and attempt.message else (f"Publicado na Meta: {attempt.meta_media_id}" if attempt and attempt.meta_media_id else ""),
+            "running":post.status in {PostStatus.CLAIMED,PostStatus.UPLOADING,PostStatus.WAITING_META,PostStatus.PUBLISHING},
         })
-    return sorted(items, key=lambda item:item["when"] or datetime.min, reverse=True)[:100]
+    return items
 @app.get("/api/activity/summary")
 def activity_summary(s:Session=Depends(db)):
     return {
