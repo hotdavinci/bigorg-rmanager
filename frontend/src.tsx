@@ -20,10 +20,10 @@ const localDate = () => {
   return now.toISOString().slice(0, 10);
 };
 const statusLabel = (status: string) => ({ PENDING: 'AGENDADO', CLAIMED: 'INICIANDO', UPLOADING: 'ENVIANDO', WAITING_META: 'PROCESSANDO NA META', PUBLISHING: 'PUBLICANDO', PUBLISHED: 'PUBLICADO', FAILED: 'FALHOU', SKIPPED: 'PULADO', CANCELLED: 'CANCELADO', PAUSED: 'PAUSADO' }[status] || status);
-const defaultCampaignName = (start:string, days:number, intervals:string[], models:number[]) => {
+const defaultCampaignName = (start:string, days:number, intervals:string[], accountIds:number[]) => {
   const first=new Date(`${start}T12:00:00`); const last=new Date(first); last.setDate(last.getDate()+Math.max(1,days)-1);
   const fmt=(value:Date)=>`${String(value.getDate()).padStart(2,'0')}/${String(value.getMonth()+1).padStart(2,'0')}`;
-  return `${fmt(first)}-${fmt(last)} · ${intervals.length} mídia(s)/dia · ${models.length} modelo(s)`;
+  return `${fmt(first)}-${fmt(last)} · ${intervals.length} mídia(s)/dia · ${accountIds.length} conta(s)`;
 };
 
 function App() {
@@ -65,12 +65,13 @@ function App() {
   const [scheduleIntervals, setScheduleIntervals] = useState('11:00-13:00');
   const [scheduleStrategy, setScheduleStrategy] = useState('sequential');
   const [scheduleRanges, setScheduleRanges] = useState<string[]>(['11:00-13:00']);
-  const setCampaignOpen = (open:boolean) => { if(open) { const ranges=defaults.intervals||['11:00-13:00']; const models=defaults.script_ids||[]; const days=Number(defaults.days||7); const start=localDate(); setSetupAccounts([]); setSetupMedia([]); setSetupScripts(models); setScheduleStart(start); setScheduleRanges(ranges); setScheduleDays(String(days)); setScheduleStrategy(defaults.strategy||'sequential'); setCoverPath(defaults.cover_path||''); setCoverName(defaults.cover_path?'Capa padrão selecionada':''); setCaptionListId(defaults.caption_list_id||null); setCaptionText(defaults.caption_text||''); setCampaignName(defaultCampaignName(start,days,ranges,models)); setCampaignDescription(''); } setCampaignOpenState(open); };
+  const setCampaignOpen = (open:boolean) => { if(open) { const ranges=defaults.intervals||['11:00-13:00']; const models=defaults.script_ids||[]; const days=Number(defaults.days||7); const start=localDate(); setSetupAccounts([]); setSetupMedia([]); setSetupScripts(models); setScheduleStart(start); setScheduleRanges(ranges); setScheduleDays(String(days)); setScheduleStrategy(defaults.strategy||'sequential'); setCoverPath(defaults.cover_path||''); setCoverName(defaults.cover_path?'Capa padrão selecionada':''); setCaptionListId(defaults.caption_list_id||null); setCaptionText(defaults.caption_text||''); setCampaignName(defaultCampaignName(start,days,ranges,[])); setCampaignDescription('Contas usadas: nenhuma'); } setCampaignOpenState(open); };
   const refresh = () => { api('/dashboard').then(setDashboard); api('/meta/accounts').then(setAccounts); api('/media').then(setMedia); api('/campaigns').then(setCampaigns); api('/scripts').then(setScripts); api('/caption-lists').then(setCaptionLists); api('/campaign-defaults').then(setDefaults); api('/scheduled-posts').then(setAgenda); api('/activity').then(setActivity); api('/activity/summary').then(setActivitySummary); api('/tunnel/status').then(setTunnel); };
+  const selectedAccountNames=accounts.filter(account=>setupAccounts.includes(account.id)).map(account=>`@${account.username||account.nome}`).join(', ');
   useEffect(refresh, []);
   useEffect(() => { const timer = window.setInterval(refresh, 5000); return () => window.clearInterval(timer); }, []);
   useEffect(() => { api('/auth/status').then(result => setAuthenticated(result.authenticated)).catch(() => setAuthenticated(false)); }, []);
-  useEffect(() => { if(campaignOpen) setCampaignName(defaultCampaignName(scheduleStart,Number(scheduleDays)||1,scheduleRanges,setupScripts)); }, [campaignOpen,scheduleStart,scheduleDays,scheduleRanges,setupScripts]);
+  useEffect(() => { if(campaignOpen) { setCampaignName(defaultCampaignName(scheduleStart,Number(scheduleDays)||1,scheduleRanges,setupAccounts)); setCampaignDescription(selectedAccountNames?`Contas usadas: ${selectedAccountNames}`:'Contas usadas: nenhuma'); } }, [campaignOpen,scheduleStart,scheduleDays,scheduleRanges,setupAccounts,selectedAccountNames]);
   const importMedia = async (event: React.ChangeEvent<HTMLInputElement>) => {
     if (!event.target.files?.length) return;
     const data = new FormData(); [...event.target.files].forEach(file => data.append('files', file));
