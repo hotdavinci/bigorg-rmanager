@@ -236,10 +236,13 @@ def activity(s:Session=Depends(db)):
         post=s.get(ScheduledPost,attempt.post_id)
         campaign=s.get(Campaign,post.campaign_id) if post else None
         account=s.get(InstagramAccount,post.account_id) if post else None
+        media=s.get(Media,post.processed_media_id) if post else None
         items.append({
             "id":f"publish-{attempt.id}", "type":"PUBLICAÇÃO", "status":attempt.status,
             "title":f"{campaign.name if campaign else 'Campanha removida'} · @{account.username if account else 'conta removida'}",
             "when":attempt.finished_at or attempt.created_at,
+            "scheduled_for":post.scheduled_for if post else None,
+            "media_name":media.original_name if media else "Mídia removida",
             "detail":attempt.message or (f"Publicado na Meta: {attempt.meta_media_id}" if attempt.meta_media_id else "Enviando para a Meta..."),
             "running":attempt.status in {"UPLOADING", "WAITING_META", "PUBLISHING"},
         })
