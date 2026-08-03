@@ -113,7 +113,17 @@ function App() {
   const removeMedia = (item:any) => setDeleteModal({...item,action:'media'});
   const removeSelectedMedia = async () => { if(!deleteModal?.ids?.length)return; try { const result=await api('/media',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify(deleteModal.ids)}); setDeleteModal(null); setSelectedMedia([]); setNotice(`${result.deleted.length} mídia(s) excluída(s).${result.skipped.length?` ${result.skipped.length} protegida(s) foram mantidas.`:''}`); refresh(); } catch(error:any){setNotice(error.message);} };
   const removeAccount = (account:any) => setDeleteModal({...account,action:'account',nome:`@${account.username||account.nome}`});
-  const openAccountReels = () => { const targets=selectedAccounts.length?accounts.filter(account=>selectedAccounts.includes(account.id)):accounts; targets.forEach(account=>{const username=(account.username||account.nome||'').replace(/^@/,''); if(username) window.open(`https://instagram.com/${username}/reels`,'_blank','noopener,noreferrer');}); };
+  const openAccountReels = () => {
+    const targets=selectedAccounts.length?accounts.filter(account=>selectedAccounts.includes(account.id)):accounts;
+    // Links reais com alvo diferente: o Chrome os trata como abas, não como a
+    // mesma janela de popup que acabava sendo reaproveitada.
+    targets.forEach(account=>{
+      const username=(account.username||account.nome||'').replace(/^@/,''); if(!username) return;
+      const link=document.createElement('a'); link.href=`https://instagram.com/${username}/reels`; link.target=`instagram_reels_${account.id}`; link.rel='noopener noreferrer'; link.style.display='none';
+      document.body.appendChild(link); link.click(); link.remove();
+    });
+    if(targets.length>1) setNotice(`${targets.length} contas selecionadas: abrindo uma aba para cada uma.`);
+  };
   const removeSelectedAccounts = async () => { if(!deleteModal?.ids?.length)return; try { const result=await api('/meta/accounts',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify(deleteModal.ids)}); setDeleteModal(null); setSelectedAccounts([]); setNotice(`${result.removed.length} conta(s) removida(s).`); refresh(); } catch(error:any){setNotice(error.message);} };
   const removeScript = (script:any) => setDeleteModal({...script,action:'script'});
   const removeCaptionList = (list:any) => setDeleteModal({...list,action:'captions'});
