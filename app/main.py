@@ -154,6 +154,12 @@ def oauth_start(s:Session=Depends(db)):
     reload_runtime_settings()
     meta.require_config(); state=secrets.token_urlsafe(32); s.add(OAuthState(state=state)); s.commit()
     return RedirectResponse(meta.authorization_url(state))
+@app.get("/api/meta/oauth/url")
+def oauth_url(s:Session=Depends(db)):
+    """Cria um link de autorização de uso único para ser aberto em qualquer navegador."""
+    reload_runtime_settings()
+    meta.require_config(); state=secrets.token_urlsafe(32); s.add(OAuthState(state=state)); s.commit()
+    return {"url":meta.authorization_url(state)}
 @app.get("/api/meta/oauth/callback", response_class=HTMLResponse)
 async def oauth_callback(code:str|None=None,state:str|None=None,error:str|None=None,s:Session=Depends(db)):
     item=s.get(OAuthState,state) if state else None
