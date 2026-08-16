@@ -1,11 +1,24 @@
-import hashlib, shutil, subprocess, uuid, os
+import hashlib, shutil, subprocess, uuid, os, time as time_module
 from datetime import datetime
 from pathlib import Path
 from sqlalchemy import select, delete
+from sqlalchemy.exc import OperationalError
 from .config import settings, data_path
 from .models import Media, Campaign, CampaignStatus, ProcessingExecution, Script, CampaignScript, ProcessedCover
 
 MEDIA_EXT={".mp4", ".mov"}; IMAGE_EXT={".jpg", ".jpeg", ".png", ".webp"}
+
+def commit_with_retry(session, attempts: int=5):
+    """Commits only short SQLite writes; never keep a transaction during FFmpeg."""
+    for attempt in range(attempts):
+        try:
+            session.commit()
+            return
+        except OperationalError as exc:
+            session.rollback()
+            if "locked" not in str(exc).lower() or attempt == attempts-1:
+                raise
+            time_module.sleep(0.15*(attempt+1))
 def sha(path: Path):
     h=hashlib.sha256()
     with path.open("rb") as f:
@@ -86,7 +99,9 @@ def process_slot(session, campaign_id: int, source_id: int, slot_key: str):
             execution.stdout=run.stdout[-20000:]; execution.stderr=run.stderr[-20000:]; execution.exit_code=run.returncode; execution.finished_at=datetime.utcnow(); execution.status="SUCCESS" if run.returncode==0 else "FAILED"
             if run.returncode: raise RuntimeError(f"O script {script.name} falhou para {source.original_name}")
         except Exception as exc:
-            execution.status="FAILED"; execution.stderr=(execution.stderr+"\n"+str(exc))[-20000:]; execution.finished_at=datetime.utcnow(); raise
+            execution.status="FAILED"; execution.stderr=(execution.stderr+"\n"+str(exc))[-20000:]; execution.finished_at=datetime.utcnow()
+            commit_with_retry(session)
+            raise
     videos=[p for p in work.iterdir() if p.suffix.lower() in MEDIA_EXT and (p.name not in before or sha(p)!=before[p.name])]
     if not videos: raise RuntimeError(f"Não foi possível identificar vídeo processado para {source.original_name}")
     final_video=videos[0]
@@ -134,10 +149,14 @@ def process_slots_batch(session, campaign_id: int, slots: list[dict]):
     for script in scripts:
         script_file=data_path(script.relative_path); local_script=work/script_file.name; shutil.copy2(script_file,local_script)
         execution=ProcessingExecution(campaign_id=campaign_id,script_id=script.id,workspace=str(work.relative_to(settings.data_dir)))
-        session.add(execution); session.flush()
+        # Persist and RELEASE the SQLite writer before the user script starts.
+        # FFmpeg can run for minutes; holding a transaction here blocks OAuth,
+        # cancellation and the publication scheduler.
+        session.add(execution); commit_with_retry(session)
         try:
             run=subprocess.run([settings.python_executable,local_script.name],cwd=work,capture_output=True,text=True,encoding="utf-8",errors="replace",env={**os.environ,"PYTHONIOENCODING":"utf-8"},timeout=settings.processing_timeout_seconds)
             execution.stdout=run.stdout[-20000:]; execution.stderr=run.stderr[-20000:]; execution.exit_code=run.returncode; execution.finished_at=datetime.utcnow(); execution.status="SUCCESS" if run.returncode==0 else "FAILED"
+            commit_with_retry(session)
             if run.returncode: raise RuntimeError(f"O script {script.name} falhou no lote")
         except Exception as exc:
             execution.status="FAILED"; execution.stderr=(execution.stderr+"\n"+str(exc))[-20000:]; execution.finished_at=datetime.utcnow(); raise
@@ -155,7 +174,9 @@ def process_slots_batch(session, campaign_id: int, slots: list[dict]):
         slot_key=item["slot"]["slot_key"]; outdir=settings.data_dir/"media/processed"/str(campaign_id)/slot_key; outdir.mkdir(parents=True,exist_ok=True)
         target=outdir/f"{uuid.uuid4().hex}{final_video.suffix.lower()}"; shutil.copy2(final_video,target)
         media=Media(original_name=final_video.name,stored_name=target.name,relative_path=str(target.relative_to(settings.data_dir)),kind="processed",extension=target.suffix.lower(),size=target.stat().st_size,sha256=sha(target),status="Processada",original_media_id=item["source"].id)
-        session.add(media); session.flush(); cover_result=None
+        # The caller persists all result media/posts together at the end of the
+        # batch.  Do not acquire the SQLite writer while files are being copied.
+        session.add(media); cover_result=None
         if cover_source:
             cover_matches=[p for p in changed_covers if item["token"] in p.name and p not in used_covers]
             final_cover=cover_matches[0] if cover_matches else next((p for p in fallback_covers if p not in used_covers),None)
