@@ -18,3 +18,4 @@
 /* Account health groups. */
 .tag-error{background:#5b2438!important;color:#ffd7df!important}.account-section-title{margin-top:2rem}
 .campaign-account-note{margin:.2rem 0 1rem;color:#c9c5da;padding:.8rem 1rem;border:1px solid #51428c;border-radius:10px;background:#211d3b}
+.insight-periods{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}
