@@ -184,4 +184,9 @@ def process_slots_batch(session, campaign_id: int, slots: list[dict]):
             used_covers.add(final_cover); cdir=settings.data_dir/"media/covers"/str(campaign_id)/slot_key; cdir.mkdir(parents=True,exist_ok=True)
             ctarget=cdir/f"{uuid.uuid4().hex}{final_cover.suffix.lower()}"; shutil.copy2(final_cover,ctarget); cover_result=(str(ctarget.relative_to(settings.data_dir)),sha(ctarget))
         results.append((item["slot"],media,cover_result))
+    # Os posts abaixo referenciam ``processed_media_id`` diretamente, sem um
+    # relacionamento ORM. Gere os IDs agora, em uma escrita curta, antes de a
+    # agenda usar cada mídia. Sem este flush o valor ainda é None e o SQLite
+    # corretamente recusa o agendamento.
+    session.flush()
     return results
