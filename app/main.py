@@ -638,13 +638,25 @@ def insight_reels(period:str="total",limit:int=100,s:Session=Depends(db)):
     windows={"24h":timedelta(hours=24),"7d":timedelta(days=7),"30d":timedelta(days=30)}
     cutoff=datetime.utcnow()-windows[period] if period in windows else None
     rows=[]
+    published_attempts={str(attempt.meta_media_id):attempt for attempt in s.scalars(select(PublicationAttempt).where(PublicationAttempt.status=="PUBLISHED",PublicationAttempt.meta_media_id!=""))}
     for reel in s.scalars(select(InstagramReel)).all():
         account=s.get(InstagramAccount,reel.account_id)
         baseline=None
         if cutoff:
             baseline=s.execute(select(InstagramReelSnapshot.views,InstagramReelSnapshot.likes,InstagramReelSnapshot.comments).where(InstagramReelSnapshot.reel_id==reel.id,InstagramReelSnapshot.captured_at<=cutoff).order_by(InstagramReelSnapshot.captured_at.desc())).first()
         base_views,base_likes,base_comments=baseline if baseline else (reel.views,reel.likes,reel.comments)
-        rows.append({"id":reel.id,"meta_media_id":reel.meta_media_id,"conta":account.username if account else "conta removida","caption":reel.caption,"permalink":reel.permalink,"thumbnail_url":reel.thumbnail_url,"published_at":reel.published_at,"views":reel.views,"likes":reel.likes,"comments":reel.comments,"growth":max(0,reel.views-base_views) if cutoff else reel.views,"likes_value":max(0,reel.likes-base_likes) if cutoff else reel.likes,"comments_value":max(0,reel.comments-base_comments) if cutoff else reel.comments,"has_baseline":baseline is not None})
+        library_media=None
+        # Reels publicados por este sistema trazem o ID da Meta na tentativa de
+        # publicação. Daí percorremos post -> processado -> original, sem usar
+        # aproximação por nome ou legenda.
+        attempt=published_attempts.get(str(reel.meta_media_id))
+        if attempt:
+            post=s.get(ScheduledPost,attempt.post_id)
+            processed=s.get(Media,post.processed_media_id) if post else None
+            original=s.get(Media,processed.original_media_id) if processed and processed.original_media_id else None
+            if original and original.kind=="original":
+                library_media={"id":original.id,"name":original.original_name,"thumbnail_url":f"/api/media/{original.id}/thumbnail","video_url":f"/api/media/{original.id}/stream"}
+        rows.append({"id":reel.id,"meta_media_id":reel.meta_media_id,"conta":account.username if account else "conta removida","caption":reel.caption,"permalink":reel.permalink,"thumbnail_url":reel.thumbnail_url,"library_media":library_media,"published_at":reel.published_at,"views":reel.views,"likes":reel.likes,"comments":reel.comments,"growth":max(0,reel.views-base_views) if cutoff else reel.views,"likes_value":max(0,reel.likes-base_likes) if cutoff else reel.likes,"comments_value":max(0,reel.comments-base_comments) if cutoff else reel.comments,"has_baseline":baseline is not None})
     rows.sort(key=lambda item:(item["growth"],item["views"]),reverse=True)
     selected=rows[:min(max(limit,1),500)]
     return {"period":period,"reels":selected,"summary":{"views":sum(item["growth"] for item in rows),"likes":sum(item["likes_value"] for item in rows),"comments":sum(item["comments_value"] for item in rows),"reels":len(rows)},"accounts":[{"id":account.id,"username":account.username,"error":account.last_insights_error,"synced_at":max([reel.synced_at for reel in s.scalars(select(InstagramReel).where(InstagramReel.account_id==account.id))],default=None)} for account in s.scalars(select(InstagramAccount))]}
@@ -710,6 +722,14 @@ def media_thumbnail(media_id:int,s:Session=Depends(db)):
     image=thumbnail(item)
     if not image: raise HTTPException(404,"Não foi possível gerar a miniatura")
     return FileResponse(image,media_type="image/jpeg")
+@app.get("/api/media/{media_id}/stream")
+def stream_original_media(media_id:int,s:Session=Depends(db)):
+    item=s.get(Media,media_id)
+    if not item or item.kind!="original": raise HTTPException(404,"Vídeo original não encontrado")
+    path=data_path(item.relative_path)
+    if not path.is_file(): raise HTTPException(404,"O arquivo original não existe mais")
+    media_type="video/mp4" if item.extension.lower()==".mp4" else "video/quicktime"
+    return FileResponse(path,media_type=media_type,filename=item.original_name)
 @app.delete("/api/media/{media_id}")
 def remove_media(media_id:int,s:Session=Depends(db)):
     item=s.get(Media,media_id)
