@@ -24,3 +24,4 @@
 .insight-row .insight-cover{display:block!important;flex:0 0 72px!important;width:72px!important;height:72px!important;min-width:72px!important;max-width:72px!important;min-height:72px!important;max-height:72px!important;object-fit:cover!important;background:#24243a;border-radius:10px}
 .insight-values{display:flex;gap:14px;margin-top:8px;color:#bdb9d5;font-size:13px}.insight-values span{display:inline-flex;align-items:center;gap:5px}.insight-values svg{color:#c4b5fd}
 @media(max-width:680px){.insight-metrics{grid-template-columns:repeat(2,1fr)}.insight-row{align-items:flex-start}.insight-row .secondary{padding:8px 10px;font-size:12px}}
+.library-note{color:#aaa8c7;margin:-5px 0 16px;font-size:13px}

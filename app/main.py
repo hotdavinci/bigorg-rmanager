@@ -427,6 +427,28 @@ def generation_cancelled(session: Session, campaign_id: int) -> bool:
         select(Campaign.status).where(Campaign.id==campaign_id).execution_options(autoflush=False)
     ).scalar_one_or_none()==CampaignStatus.CANCELLED
 
+def discard_processed_files_for_terminal_posts(session: Session, campaign_id: int) -> int:
+    """Descarta arquivos de trabalho que já não podem mais ser publicados.
+
+    Mantemos só o metadado no post cancelado/publicado para o histórico; o
+    vídeo processado em si nunca precisa permanecer no disco ou na Biblioteca.
+    """
+    terminal=[PostStatus.PUBLISHED,PostStatus.CANCELLED,PostStatus.SKIPPED]
+    removed=0
+    posts=list(session.scalars(select(ScheduledPost).where(ScheduledPost.campaign_id==campaign_id, ScheduledPost.status.in_(terminal))))
+    for post in posts:
+        media=session.get(Media,post.processed_media_id)
+        if not media: continue
+        active_uses=session.scalar(select(func.count()).select_from(ScheduledPost).where(
+            ScheduledPost.processed_media_id==media.id,
+            ScheduledPost.status.not_in(terminal)
+        )) or 0
+        if not active_uses and data_path(media.relative_path).is_file():
+            data_path(media.relative_path).unlink(missing_ok=True)
+            media.status="Arquivo temporário descartado"
+            removed+=1
+    return removed
+
 def purge_campaign(session: Session, campaign_id: int) -> bool:
     """Remove uma campanha somente quando nenhuma rotina usa seus registros.
 
@@ -455,6 +477,13 @@ def purge_campaign(session: Session, campaign_id: int) -> bool:
     session.execute(delete(CampaignSourceMedia).where(CampaignSourceMedia.campaign_id==campaign_id))
     session.execute(delete(CampaignScript).where(CampaignScript.campaign_id==campaign_id))
     session.delete(campaign)
+    # Após apagar a campanha, registros processados que não pertencem a nenhum
+    # post restante são lixo de trabalho e podem ser removidos por completo.
+    session.flush()
+    for media in list(session.scalars(select(Media).where(Media.kind=="processed"))):
+        if not session.scalar(select(func.count()).select_from(ScheduledPost).where(ScheduledPost.processed_media_id==media.id)):
+            data_path(media.relative_path).unlink(missing_ok=True)
+            session.delete(media)
     commit_with_retry(session)
     progress_file(campaign_id).unlink(missing_ok=True)
     return True
@@ -817,7 +846,7 @@ def cancel_campaign(campaign_id:int,s:Session=Depends(db)):
     c=s.get(Campaign,campaign_id)
     if not c: raise HTTPException(404,"Campanha não encontrada")
     s.query(ScheduledPost).filter(ScheduledPost.campaign_id==campaign_id, ScheduledPost.status.in_([PostStatus.PENDING,PostStatus.PAUSED,PostStatus.CLAIMED])).update({ScheduledPost.status:PostStatus.CANCELLED},synchronize_session=False)
-    c.status=CampaignStatus.CANCELLED; audit(s,"CAMPAIGN_CANCELLED","Campanha cancelada pelo usuário; agendamentos futuros interrompidos.",campaign_id)
+    c.status=CampaignStatus.CANCELLED; discarded=discard_processed_files_for_terminal_posts(s,campaign_id); audit(s,"CAMPAIGN_CANCELLED",f"Campanha cancelada pelo usuário; agendamentos futuros interrompidos. {discarded} arquivo(s) temporário(s) descartado(s).",campaign_id)
     commit_with_retry(s); save_generation_progress(campaign_id,status="CANCELLED",message="Cancelamento solicitado; o lote atual será encerrado sem iniciar outro.",finished_at=datetime.utcnow().isoformat())
     return {"ok":True,"status":c.status}
 @app.put("/api/campaigns/{campaign_id}/setup")
