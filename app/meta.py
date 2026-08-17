@@ -11,7 +11,7 @@ from pathlib import Path
 from fastapi import HTTPException
 from .config import settings
 
-SCOPES = "instagram_business_basic,instagram_business_content_publish,instagram_business_manage_insights"
+SCOPES = "instagram_business_basic,instagram_business_manage_messages,instagram_business_manage_comments,instagram_business_content_publish,instagram_business_manage_insights"
 
 def safe_meta_error(response: httpx.Response) -> str:
     """Expose Meta's useful OAuth reason without ever echoing tokens or secrets."""
@@ -46,7 +46,9 @@ def decrypt(value: str) -> str:
 def authorization_url(state: str) -> str:
     require_config()
     client_id=settings.meta_instagram_app_id or settings.meta_app_id
-    return str(httpx.URL(settings.meta_oauth_authorize_url).copy_merge_params({"enable_fb_login":"0","force_authentication":"1","client_id":client_id,"redirect_uri":settings.meta_redirect_uri,"response_type":"code","scope":SCOPES,"state":state}))
+    # Match the Business Login URL emitted by the Meta dashboard.  In
+    # particular, force_reauth is the current documented flag for this flow.
+    return str(httpx.URL(settings.meta_oauth_authorize_url).copy_merge_params({"force_reauth":"true","client_id":client_id,"redirect_uri":settings.meta_redirect_uri,"response_type":"code","scope":SCOPES,"state":state}))
 
 async def exchange_code(code: str) -> tuple[str, datetime|None]:
     require_config()
