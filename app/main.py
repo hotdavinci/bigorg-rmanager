@@ -940,7 +940,17 @@ def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(
         if generation_cancelled(s,campaign_id):
             save_generation_progress(campaign_id,status="CANCELLED",total=len(jobs),completed=len(jobs),scheduled=scheduled,failed=0,batch_size=batch_size,message="Campanha cancelada.",finished_at=datetime.utcnow().isoformat())
             return {"count":scheduled,"status":CampaignStatus.CANCELLED}
-        c=s.get(Campaign,campaign_id); c.status=CampaignStatus.ACTIVE; commit_with_retry(s)
+        # Uma campanha só pode ficar ativa se existir ao menos uma publicação
+        # futura materializada. Sem isso (por exemplo, todos os intervalos já
+        # passaram hoje), "Ativa" seria enganoso e não haveria progresso nem
+        # nada para o scheduler executar.
+        c=s.get(Campaign,campaign_id)
+        if scheduled==0:
+            c.status=CampaignStatus.PROCESSING_FAILED
+            commit_with_retry(s)
+            save_generation_progress(campaign_id,status="FAILED",total=len(jobs),completed=len(jobs),scheduled=0,failed=0,batch_size=batch_size,message="Nenhum horário futuro disponível para agendar. Ajuste a data inicial ou os intervalos.",finished_at=datetime.utcnow().isoformat())
+            return {"count":0,"status":c.status}
+        c.status=CampaignStatus.ACTIVE; commit_with_retry(s)
         save_generation_progress(campaign_id,status="COMPLETED",total=len(jobs),completed=len(jobs),scheduled=scheduled,failed=0,batch_size=batch_size,message=f"Concluído: {scheduled} posts agendados.",finished_at=datetime.utcnow().isoformat())
         return {"count":position,"status":c.status}
     except Exception as exc:
