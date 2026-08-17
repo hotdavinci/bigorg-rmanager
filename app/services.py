@@ -1,4 +1,4 @@
-import hashlib, shutil, subprocess, uuid, os, time as time_module
+import hashlib, shutil, subprocess, uuid, os, time as time_module, threading
 from datetime import datetime
 from pathlib import Path
 from sqlalchemy import select, delete
@@ -7,6 +7,10 @@ from .config import settings, data_path
 from .models import Media, Campaign, CampaignStatus, ProcessingExecution, Script, CampaignScript, ProcessedCover
 
 MEDIA_EXT={".mp4", ".mov"}; IMAGE_EXT={".jpg", ".jpeg", ".png", ".webp"}
+# A abertura da biblioteca pode pedir dezenas de capas de uma vez. Limitar
+# somente a extração de frames evita saturar a VPS, sem bloquear SQLite ou o
+# scheduler de publicação.
+thumbnail_slots=threading.BoundedSemaphore(2)
 
 def commit_with_retry(session, attempts: int=5):
     """Commits only short SQLite writes; never keep a transaction during FFmpeg."""
@@ -33,9 +37,10 @@ def thumbnail(media: Media, force: bool=False) -> Path|None:
     if target.is_file() and not force: return target
     if force: target.unlink(missing_ok=True)
     try:
-        # The 0:00 frame is frequently black because of fade-ins or codec keyframes.
-        run=subprocess.run([shutil.which("ffmpeg") or "ffmpeg","-y","-ss","1","-i",str(source),"-frames:v","1","-vf","scale=480:-2",str(target)],capture_output=True,timeout=45)
-        return target if run.returncode==0 and target.is_file() else None
+        with thumbnail_slots:
+            # The 0:00 frame is frequently black because of fade-ins or codec keyframes.
+            run=subprocess.run([shutil.which("ffmpeg") or "ffmpeg","-y","-ss","1","-i",str(source),"-frames:v","1","-vf","scale=480:-2",str(target)],capture_output=True,timeout=45)
+            return target if run.returncode==0 and target.is_file() else None
     except (OSError,subprocess.TimeoutExpired): return None
 def copy_media(src: Path, original_name: str|None=None):
     if src.suffix.lower() not in MEDIA_EXT: raise ValueError("Apenas .mp4 e .mov são aceitos")

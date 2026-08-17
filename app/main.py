@@ -667,11 +667,17 @@ def media(kind:str|None=None,s:Session=Depends(db)):
 @app.post("/api/media/refresh-thumbnails")
 def refresh_media_thumbnails(s:Session=Depends(db)):
     items=list(s.scalars(select(Media).where(Media.kind=="original")))
+    # A geração usa FFmpeg e pode levar segundos por arquivo. Solte o SQLite
+    # antes desse trabalho para não prender o painel inteiro.
+    s.expunge_all(); s.close()
     return {"ok":True,"generated":sum(1 for item in items if thumbnail(item,force=True)),"total":len(items)}
 @app.get("/api/media/{media_id}/thumbnail")
 def media_thumbnail(media_id:int,s:Session=Depends(db)):
     item=s.get(Media,media_id)
     if not item: raise HTTPException(404,"Mídia não encontrada")
+    # Não mantenha uma conexão do pool enquanto o FFmpeg extrai o frame. Abrir
+    # a Biblioteca dispara muitos pedidos de miniatura em paralelo.
+    s.expunge(item); s.close()
     image=thumbnail(item)
     if not image: raise HTTPException(404,"Não foi possível gerar a miniatura")
     return FileResponse(image,media_type="image/jpeg")
