@@ -181,7 +181,7 @@ async def sync_reel_insights(session: Session) -> dict:
                 reel=session.scalar(select(InstagramReel).where(InstagramReel.account_id==account.id,InstagramReel.meta_media_id==str(item["id"])))
                 if not reel:
                     reel=InstagramReel(account_id=account.id,meta_media_id=str(item["id"])); session.add(reel); session.flush()
-                reel.caption=str(item.get("caption") or ""); reel.permalink=str(item.get("permalink") or ""); reel.thumbnail_url=str(item.get("thumbnail_url") or ""); reel.published_at=as_local_datetime(item.get("timestamp")); reel.views=int(item.get("views") or 0); reel.likes=int(item.get("like_count") or 0); reel.comments=int(item.get("comments_count") or 0); reel.synced_at=datetime.utcnow()
+                reel.caption=str(item.get("caption") or ""); reel.permalink=str(item.get("permalink") or ""); reel.thumbnail_url=str(item.get("thumbnail_url") or ""); reel.video_url=str(item.get("media_url") or ""); reel.published_at=as_local_datetime(item.get("timestamp")); reel.views=int(item.get("views") or 0); reel.likes=int(item.get("like_count") or 0); reel.comments=int(item.get("comments_count") or 0); reel.synced_at=datetime.utcnow()
                 session.add(InstagramReelSnapshot(reel_id=reel.id,views=reel.views,likes=reel.likes,comments=reel.comments))
                 synced+=1
             account.last_insights_error=""
@@ -345,6 +345,8 @@ async def life(app):
         snapshot_columns={row[1] for row in connection.exec_driver_sql("PRAGMA table_info(instagram_reel_snapshots)")}
         if "likes" not in snapshot_columns: connection.exec_driver_sql("ALTER TABLE instagram_reel_snapshots ADD COLUMN likes INTEGER NOT NULL DEFAULT 0")
         if "comments" not in snapshot_columns: connection.exec_driver_sql("ALTER TABLE instagram_reel_snapshots ADD COLUMN comments INTEGER NOT NULL DEFAULT 0")
+        reel_columns={row[1] for row in connection.exec_driver_sql("PRAGMA table_info(instagram_reels)")}
+        if "video_url" not in reel_columns: connection.exec_driver_sql("ALTER TABLE instagram_reels ADD COLUMN video_url VARCHAR(1500) NOT NULL DEFAULT ''")
         cover_columns={row[1] for row in connection.exec_driver_sql("PRAGMA table_info(processed_covers)")}
         if cover_columns and "post_id" not in cover_columns:
             # SQLite cannot remove the old unique constraint in place. Keep the
@@ -656,7 +658,7 @@ def insight_reels(period:str="total",limit:int=100,s:Session=Depends(db)):
             original=s.get(Media,processed.original_media_id) if processed and processed.original_media_id else None
             if original and original.kind=="original":
                 library_media={"id":original.id,"name":original.original_name,"thumbnail_url":f"/api/media/{original.id}/thumbnail","video_url":f"/api/media/{original.id}/stream"}
-        rows.append({"id":reel.id,"meta_media_id":reel.meta_media_id,"conta":account.username if account else "conta removida","caption":reel.caption,"permalink":reel.permalink,"thumbnail_url":reel.thumbnail_url,"library_media":library_media,"published_at":reel.published_at,"views":reel.views,"likes":reel.likes,"comments":reel.comments,"growth":max(0,reel.views-base_views) if cutoff else reel.views,"likes_value":max(0,reel.likes-base_likes) if cutoff else reel.likes,"comments_value":max(0,reel.comments-base_comments) if cutoff else reel.comments,"has_baseline":baseline is not None})
+        rows.append({"id":reel.id,"meta_media_id":reel.meta_media_id,"conta":account.username if account else "conta removida","caption":reel.caption,"permalink":reel.permalink,"thumbnail_url":reel.thumbnail_url,"video_url":reel.video_url,"library_media":library_media,"published_at":reel.published_at,"views":reel.views,"likes":reel.likes,"comments":reel.comments,"growth":max(0,reel.views-base_views) if cutoff else reel.views,"likes_value":max(0,reel.likes-base_likes) if cutoff else reel.likes,"comments_value":max(0,reel.comments-base_comments) if cutoff else reel.comments,"has_baseline":baseline is not None})
     rows.sort(key=lambda item:(item["growth"],item["views"]),reverse=True)
     selected=rows[:min(max(limit,1),500)]
     return {"period":period,"reels":selected,"summary":{"views":sum(item["growth"] for item in rows),"likes":sum(item["likes_value"] for item in rows),"comments":sum(item["comments_value"] for item in rows),"reels":len(rows)},"accounts":[{"id":account.id,"username":account.username,"error":account.last_insights_error,"synced_at":max([reel.synced_at for reel in s.scalars(select(InstagramReel).where(InstagramReel.account_id==account.id))],default=None)} for account in s.scalars(select(InstagramAccount))]}

@@ -87,7 +87,7 @@ async def reels_with_views(account_id: str, token: str, limit: int=100) -> list[
     Insight permission errors are deliberately returned to the caller; they must
     never invalidate an otherwise healthy publishing token.
     """
-    fields="id,caption,permalink,thumbnail_url,timestamp,media_type,media_product_type,like_count,comments_count"
+    fields="id,caption,permalink,thumbnail_url,media_url,timestamp,media_type,media_product_type,like_count,comments_count"
     async with httpx.AsyncClient(timeout=45) as client:
         response=await client.get(f"{settings.meta_graph_base_url}/{account_id}/media",params={"fields":fields,"limit":min(max(limit,1),100),"access_token":token})
         if response.is_error: raise RuntimeError(f"Não foi possível listar Reels: {response.text[:500]}")
