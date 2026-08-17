@@ -23,6 +23,7 @@
 .insight-metrics{grid-template-columns:repeat(4,1fr)}
 .insight-row .insight-cover{display:block!important;flex:0 0 72px!important;width:72px!important;height:72px!important;min-width:72px!important;max-width:72px!important;min-height:72px!important;max-height:72px!important;object-fit:cover!important;background:#24243a;border-radius:10px}
 .insight-row .insight-video{display:block!important;flex:0 0 132px!important;width:132px!important;height:176px!important;min-width:132px!important;max-width:132px!important;min-height:176px!important;max-height:176px!important;object-fit:cover!important;background:#090a10;border:1px solid #393956;border-radius:10px}
+.insight-row .insight-embed{display:block!important;flex:0 0 190px!important;width:190px!important;height:255px!important;min-width:190px!important;max-width:190px!important;min-height:255px!important;max-height:255px!important;border:0;background:#090a10;border-radius:10px}
 .library-source{color:#c4b5fd!important;font-size:12px}
 .insight-values{display:flex;gap:14px;margin-top:8px;color:#bdb9d5;font-size:13px}.insight-values span{display:inline-flex;align-items:center;gap:5px}.insight-values svg{color:#c4b5fd}
 @media(max-width:680px){.insight-metrics{grid-template-columns:repeat(2,1fr)}.insight-row{align-items:flex-start}.insight-row .secondary{padding:8px 10px;font-size:12px}}
