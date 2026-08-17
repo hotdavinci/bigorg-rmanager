@@ -53,7 +53,16 @@ async def exchange_code(code: str) -> tuple[str, datetime|None]:
     async with httpx.AsyncClient(timeout=30) as client:
         client_id=settings.meta_instagram_app_id or settings.meta_app_id
         secret=settings.meta_instagram_app_secret or settings.meta_app_secret
-        response = await client.post(settings.meta_oauth_token_url, data={"client_id":client_id,"client_secret":secret,"grant_type":"authorization_code","redirect_uri":settings.meta_redirect_uri,"code":code})
+        # The Instagram Login token endpoint expects multipart/form-data.  A
+        # urlencoded body can be accepted by the edge but later fail with the
+        # misleading "Error validating verification code" response.
+        response = await client.post(settings.meta_oauth_token_url, files={
+            "client_id": (None, client_id),
+            "client_secret": (None, secret),
+            "grant_type": (None, "authorization_code"),
+            "redirect_uri": (None, settings.meta_redirect_uri),
+            "code": (None, code),
+        })
         if response.is_error: raise HTTPException(400, safe_meta_error(response))
         short = response.json().get("access_token")
         if not short: raise HTTPException(400, "A Meta não retornou um token de acesso")
