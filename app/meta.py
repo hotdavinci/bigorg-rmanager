@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from cryptography.fernet import Fernet, InvalidToken
 import httpx
 import asyncio
+import re
 from pathlib import Path
 from fastapi import HTTPException
 from .config import settings
@@ -16,12 +17,15 @@ def safe_meta_error(response: httpx.Response) -> str:
     """Expose Meta's useful OAuth reason without ever echoing tokens or secrets."""
     try:
         payload=response.json(); error=payload.get("error",payload) if isinstance(payload,dict) else {}
-        message=str(error.get("message") or error.get("error_user_msg") or "sem mensagem")
+        message=str(error.get("message") or error.get("error_user_msg") or "")
         code=error.get("code"); subcode=error.get("error_subcode"); kind=error.get("type")
         details=", ".join(str(item) for item in (kind, f"código {code}" if code is not None else "", f"subcódigo {subcode}" if subcode is not None else "") if item)
+        if not message:
+            message=re.sub(r"(?i)(access_token|client_secret|code)=?[^&\\s\"']+",r"\1=OCULTO",response.text or "").strip() or "resposta vazia"
         return f"Meta respondeu HTTP {response.status_code}{f' ({details})' if details else ''}: {message[:700]}"
     except Exception:
-        return f"Meta respondeu HTTP {response.status_code} ao trocar o código OAuth."
+        raw=re.sub(r"(?i)(access_token|client_secret|code)=?[^&\\s\"']+",r"\1=OCULTO",response.text or "").strip()
+        return f"Meta respondeu HTTP {response.status_code} ao trocar o código OAuth. Resposta: {raw[:700] or 'vazia'}"
 
 def require_config() -> None:
     if not (settings.meta_instagram_app_id or settings.meta_app_id) or not (settings.meta_instagram_app_secret or settings.meta_app_secret) or not settings.meta_graph_api_version:
