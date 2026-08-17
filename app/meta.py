@@ -10,7 +10,18 @@ from pathlib import Path
 from fastapi import HTTPException
 from .config import settings
 
-SCOPES = "instagram_business_basic,instagram_business_content_publish"
+SCOPES = "instagram_business_basic,instagram_business_content_publish,instagram_business_manage_insights"
+
+def safe_meta_error(response: httpx.Response) -> str:
+    """Expose Meta's useful OAuth reason without ever echoing tokens or secrets."""
+    try:
+        payload=response.json(); error=payload.get("error",payload) if isinstance(payload,dict) else {}
+        message=str(error.get("message") or error.get("error_user_msg") or "sem mensagem")
+        code=error.get("code"); subcode=error.get("error_subcode"); kind=error.get("type")
+        details=", ".join(str(item) for item in (kind, f"código {code}" if code is not None else "", f"subcódigo {subcode}" if subcode is not None else "") if item)
+        return f"Meta respondeu HTTP {response.status_code}{f' ({details})' if details else ''}: {message[:700]}"
+    except Exception:
+        return f"Meta respondeu HTTP {response.status_code} ao trocar o código OAuth."
 
 def require_config() -> None:
     if not (settings.meta_instagram_app_id or settings.meta_app_id) or not (settings.meta_instagram_app_secret or settings.meta_app_secret) or not settings.meta_graph_api_version:
@@ -39,7 +50,7 @@ async def exchange_code(code: str) -> tuple[str, datetime|None]:
         client_id=settings.meta_instagram_app_id or settings.meta_app_id
         secret=settings.meta_instagram_app_secret or settings.meta_app_secret
         response = await client.post(settings.meta_oauth_token_url, data={"client_id":client_id,"client_secret":secret,"grant_type":"authorization_code","redirect_uri":settings.meta_redirect_uri,"code":code})
-        if response.is_error: raise HTTPException(400, "A Meta recusou a autorização. Confira a Redirect URI e as permissões.")
+        if response.is_error: raise HTTPException(400, safe_meta_error(response))
         short = response.json().get("access_token")
         if not short: raise HTTPException(400, "A Meta não retornou um token de acesso")
         long = await client.get(f"{settings.meta_graph_base_url}/access_token", params={"grant_type":"ig_exchange_token","client_secret":secret,"access_token":short})
@@ -54,6 +65,26 @@ async def profile(token: str) -> dict:
         data=response.json(); data["account_id"]=str(data.get("user_id") or data.get("id") or "")
         if not data["account_id"]: raise HTTPException(400, "A Meta não retornou o ID da conta")
         return data
+
+async def reels_with_views(account_id: str, token: str, limit: int=100) -> list[dict]:
+    """Fetch recent Reel metadata, then the single views metric per Reel.
+
+    Insight permission errors are deliberately returned to the caller; they must
+    never invalidate an otherwise healthy publishing token.
+    """
+    fields="id,caption,permalink,thumbnail_url,timestamp,media_type,media_product_type,like_count,comments_count"
+    async with httpx.AsyncClient(timeout=45) as client:
+        response=await client.get(f"{settings.meta_graph_base_url}/{account_id}/media",params={"fields":fields,"limit":min(max(limit,1),100),"access_token":token})
+        if response.is_error: raise RuntimeError(f"Não foi possível listar Reels: {response.text[:500]}")
+        reels=[]
+        for item in response.json().get("data",[]):
+            if str(item.get("media_product_type"," ")).upper()!="REELS": continue
+            insight=await client.get(f"{settings.meta_graph_base_url}/{item['id']}/insights",params={"metric":"views","access_token":token})
+            if insight.is_error: raise RuntimeError(f"Insights indisponíveis: {insight.text[:500]}")
+            values=insight.json().get("data",[])
+            item["views"]=int(values[0].get("values",[{"value":0}])[0].get("value",0)) if values else 0
+            reels.append(item)
+        return reels
 
 async def publish_reel(account_id: str, token: str, video_url: str, caption: str="", cover_url: str="") -> str:
     """Official resumable Reel upload for Instagram API with Instagram Login."""
