@@ -406,6 +406,11 @@ def progress_file(campaign_id:int) -> Path:
 def save_generation_progress(campaign_id:int, **values):
     """Progresso fora do SQLite: ele aparece mesmo durante a transação longa."""
     path=progress_file(campaign_id); path.parent.mkdir(parents=True,exist_ok=True)
+    # Um pedido de exclusão pode chegar enquanto o lote está no FFmpeg. As
+    # atualizações normais de progresso não podem apagar esse sinal.
+    previous=load_generation_progress(campaign_id) or {}
+    if previous.get("deletion_requested") and "deletion_requested" not in values:
+        values["deletion_requested"]=True
     payload={"campaign_id":campaign_id,"updated_at":datetime.utcnow().isoformat(),**values}
     temporary=path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     temporary.write_text(json.dumps(payload,ensure_ascii=False),encoding="utf-8")
@@ -421,6 +426,38 @@ def generation_cancelled(session: Session, campaign_id: int) -> bool:
     return session.execute(
         select(Campaign.status).where(Campaign.id==campaign_id).execution_options(autoflush=False)
     ).scalar_one_or_none()==CampaignStatus.CANCELLED
+
+def purge_campaign(session: Session, campaign_id: int) -> bool:
+    """Remove uma campanha somente quando nenhuma rotina usa seus registros.
+
+    A geração roda em segundo plano e mantém referências aos registros de
+    execução do lote atual. Por isso o endpoint de exclusão nunca pode apagar
+    esses registros enquanto a campanha ainda está PROCESSING.
+    """
+    campaign=session.get(Campaign,campaign_id)
+    if not campaign:
+        return False
+    post_ids=select(ScheduledPost.id).where(ScheduledPost.campaign_id==campaign_id)
+    legacy_links=session.execute(text("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduled_post_covers_legacy'")).scalar()
+    if legacy_links:
+        session.execute(text("DELETE FROM scheduled_post_covers_legacy WHERE post_id IN (SELECT id FROM scheduled_posts WHERE campaign_id=:campaign_id)"),{"campaign_id":campaign_id})
+    session.execute(delete(PublicationAttempt).where(PublicationAttempt.post_id.in_(post_ids)))
+    session.execute(delete(ScheduledPostCover).where(ScheduledPostCover.post_id.in_(post_ids)))
+    session.execute(delete(ProcessedCover).where(ProcessedCover.campaign_id==campaign_id))
+    session.execute(delete(ScheduledPost).where(ScheduledPost.campaign_id==campaign_id))
+    legacy_covers=session.execute(text("SELECT 1 FROM sqlite_master WHERE type='table' AND name='processed_covers_legacy'")).scalar()
+    if legacy_covers:
+        session.execute(text("DELETE FROM processed_covers_legacy WHERE campaign_id=:campaign_id"),{"campaign_id":campaign_id})
+    session.execute(delete(ProcessingExecution).where(ProcessingExecution.campaign_id==campaign_id))
+    session.execute(delete(CampaignScheduleRule).where(CampaignScheduleRule.campaign_id==campaign_id))
+    session.execute(delete(CampaignAccountExclusion).where(CampaignAccountExclusion.campaign_id==campaign_id))
+    session.execute(delete(CampaignAccount).where(CampaignAccount.campaign_id==campaign_id))
+    session.execute(delete(CampaignSourceMedia).where(CampaignSourceMedia.campaign_id==campaign_id))
+    session.execute(delete(CampaignScript).where(CampaignScript.campaign_id==campaign_id))
+    session.delete(campaign)
+    commit_with_retry(session)
+    progress_file(campaign_id).unlink(missing_ok=True)
+    return True
 @app.get("/api/auth/status")
 def auth_status(request:Request): return {"authenticated":request.session.get("user")==settings.admin_email,"email":settings.admin_email}
 @app.post("/api/auth/login")
@@ -757,15 +794,18 @@ def create_campaign(body:CampaignIn,s:Session=Depends(db)):
 def delete_campaign(campaign_id:int,s:Session=Depends(db)):
     c=s.get(Campaign,campaign_id)
     if not c: raise HTTPException(404,"Campanha não encontrada")
-    post_ids=select(ScheduledPost.id).where(ScheduledPost.campaign_id==campaign_id)
-    legacy_links=s.execute(text("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduled_post_covers_legacy'")).scalar()
-    if legacy_links: s.execute(text("DELETE FROM scheduled_post_covers_legacy WHERE post_id IN (SELECT id FROM scheduled_posts WHERE campaign_id=:campaign_id)"),{"campaign_id":campaign_id})
-    # Both link tables and ProcessedCover itself reference scheduled_posts.
-    # Remove those dependents before removing the posts, otherwise SQLite blocks it.
-    s.execute(delete(PublicationAttempt).where(PublicationAttempt.post_id.in_(post_ids))); s.execute(delete(ScheduledPostCover).where(ScheduledPostCover.post_id.in_(post_ids))); s.execute(delete(ProcessedCover).where(ProcessedCover.campaign_id==campaign_id)); s.execute(delete(ScheduledPost).where(ScheduledPost.campaign_id==campaign_id))
-    legacy_covers=s.execute(text("SELECT 1 FROM sqlite_master WHERE type='table' AND name='processed_covers_legacy'")).scalar()
-    if legacy_covers: s.execute(text("DELETE FROM processed_covers_legacy WHERE campaign_id=:campaign_id"),{"campaign_id":campaign_id})
-    s.execute(delete(ProcessingExecution).where(ProcessingExecution.campaign_id==campaign_id)); s.execute(delete(CampaignScheduleRule).where(CampaignScheduleRule.campaign_id==campaign_id)); s.execute(delete(CampaignAccountExclusion).where(CampaignAccountExclusion.campaign_id==campaign_id)); s.execute(delete(CampaignAccount).where(CampaignAccount.campaign_id==campaign_id)); s.execute(delete(CampaignSourceMedia).where(CampaignSourceMedia.campaign_id==campaign_id)); s.execute(delete(CampaignScript).where(CampaignScript.campaign_id==campaign_id)); s.delete(c); s.commit(); return {"ok":True}
+    if c.status==CampaignStatus.PROCESSING:
+        # O subprocesso atual termina, vê este estado e não cria mais posts.
+        # A remoção definitiva ocorre na própria tarefa em segundo plano, após
+        # ela abandonar as referências ORM do lote.
+        s.query(ScheduledPost).filter(ScheduledPost.campaign_id==campaign_id, ScheduledPost.status.in_([PostStatus.PENDING,PostStatus.PAUSED,PostStatus.CLAIMED])).update({ScheduledPost.status:PostStatus.CANCELLED},synchronize_session=False)
+        c.status=CampaignStatus.CANCELLED
+        audit(s,"CAMPAIGN_DELETE_REQUESTED","Exclusão solicitada durante processamento; aguardando o lote atual parar com segurança.",campaign_id)
+        commit_with_retry(s)
+        save_generation_progress(campaign_id,status="CANCELLED",deletion_requested=True,message="Exclusão solicitada; o lote atual será descartado ao terminar.",finished_at=datetime.utcnow().isoformat())
+        return {"ok":True,"pending_cleanup":True}
+    purge_campaign(s,campaign_id)
+    return {"ok":True}
 @app.post("/api/campaigns/{campaign_id}/cancel")
 def cancel_campaign(campaign_id:int,s:Session=Depends(db)):
     c=s.get(Campaign,campaign_id)
@@ -912,7 +952,13 @@ def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(
 def run_schedule_background(campaign_id:int,body:GenerateScheduleIn):
     with DbSession() as session:
         try:
-            generate_schedule(campaign_id,body,session,True)
+            result=generate_schedule(campaign_id,body,session,True)
+            # A exclusão durante PROCESSING é intencionalmente em duas fases:
+            # primeiro cancela, depois esta própria tarefa remove os registros
+            # após o subprocesso encerrar e soltar suas referências ORM.
+            progress=load_generation_progress(campaign_id) or {}
+            if result.get("status")==CampaignStatus.CANCELLED and progress.get("deletion_requested"):
+                purge_campaign(session,campaign_id)
         except Exception as exc:
             # Falhas na preparação não podem deixar a campanha muda em READY.
             session.rollback()
