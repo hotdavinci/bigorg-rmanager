@@ -220,14 +220,16 @@ function Metric({ icon: Icon, label, value }: any) { return <div className="card
 function CampaignProgress({progress,status}:any) { const total=Number(progress?.total||0); const completed=Number(progress?.completed||0); const percent=total?Math.min(100,Math.round(completed*100/total)):0; return <div className="campaign-progress"><small><b>{progress?.message || (status==='PROCESSING_FAILED'?'A preparação falhou.':'Preparando processamento...')}</b></small>{total>0&&<><div className="progress-track"><i style={{width:`${percent}%`}}/></div><small><b>{completed}/{total}</b> vídeos processados · {progress?.scheduled||0} posts agendados{progress?.current_batch?` · lote ${progress.current_batch}`:''}</small></>}{progress?.current_media&&<small>Arquivo atual: {progress.current_media}</small>}{progress?.error&&<small className="progress-error">Erro: {progress.error}</small>}</div>; }
 function Empty({ text, action, on }: { text: string, action?: string, on?: () => void }) { return <div className="empty"><Film size={34}/><p>{text}</p>{action && <button className="secondary" onClick={on}>{action}</button>}</div>; }
 function AgendaCalendar({agenda,month,setMonth,selectedDay,setSelectedDay,retryNow}:any) {
-  const [accountFilter,setAccountFilter]=useState('');
-  const [hourFilter,setHourFilter]=useState('all');
+  const [accountFilters,setAccountFilters]=useState<string[]>([]);
+  const [hourFilters,setHourFilters]=useState<number[]>([]);
   const monthStart=new Date(month.getFullYear(),month.getMonth(),1);
   const monthEnd=new Date(month.getFullYear(),month.getMonth()+1,0);
   const monthLabel=monthStart.toLocaleDateString('pt-BR',{month:'long',year:'numeric'});
   const allPosts=agenda.map((post:any)=>({...post,date:new Date(post.quando)})).filter((post:any)=>!Number.isNaN(post.date.getTime()));
   const accountNames=[...new Set(allPosts.map((post:any)=>post.conta).filter(Boolean))].sort() as string[];
-  const posts=allPosts.filter((post:any)=>(!accountFilter||post.conta===accountFilter)&&(hourFilter==='all'||post.date.getHours()===Number(hourFilter)));
+  const posts=allPosts.filter((post:any)=>(!accountFilters.length||accountFilters.includes(post.conta))&&(!hourFilters.length||hourFilters.includes(post.date.getHours())));
+  const toggleAccount=(name:string)=>setAccountFilters(current=>current.includes(name)?current.filter(item=>item!==name):[...current,name]);
+  const toggleHour=(hour:number)=>setHourFilters(current=>current.includes(hour)?current.filter(item=>item!==hour):[...current,hour].sort((a,b)=>a-b));
   const countByDay=new Map<string,number>();
   posts.forEach((post:any)=>{const key=agendaDateKey(post.date);countByDay.set(key,(countByDay.get(key)||0)+1)});
   const firstWeekday=(monthStart.getDay()+6)%7;
@@ -240,7 +242,7 @@ function AgendaCalendar({agenda,month,setMonth,selectedDay,setSelectedDay,retryN
   return <>
     <div className="panel agenda-calendar-panel">
       <div className="agenda-calendar-header"><div><h2>Calendário da agenda</h2><p>Clique em um dia para ver os horários e posts programados.</p></div><div className="agenda-month-nav"><button className="icon-button" onClick={()=>navigate(-1)} aria-label="Mês anterior"><ChevronLeft size={20}/></button><b>{monthLabel}</b><button className="icon-button" onClick={()=>navigate(1)} aria-label="Próximo mês"><ChevronRight size={20}/></button></div></div>
-      <div className="agenda-filters"><label>Conta<select value={accountFilter} onChange={event=>setAccountFilter(event.target.value)}><option value="">Todas as contas</option>{accountNames.map(name=><option value={name} key={name}>@{name}</option>)}</select></label><label>Horário<select value={hourFilter} onChange={event=>setHourFilter(event.target.value)}><option value="all">Todos os horários</option>{Array.from({length:24},(_,hour)=><option value={hour} key={hour}>{String(hour).padStart(2,'0')}:00 às {String(hour).padStart(2,'0')}:59</option>)}</select></label></div>
+      <div className="agenda-filters"><details className="agenda-filter-menu"><summary>Contas{accountFilters.length?` · ${accountFilters.length}`:' · todas'}</summary><div className="agenda-filter-options">{accountNames.map(name=><label key={name}><input type="checkbox" checked={accountFilters.includes(name)} onChange={()=>toggleAccount(name)}/><span>@{name}</span></label>)}{accountFilters.length>0&&<button className="link-button" onClick={()=>setAccountFilters([])}>Limpar seleção</button>}</div></details><details className="agenda-filter-menu"><summary>Horários{hourFilters.length?` · ${hourFilters.length}`:' · todos'}</summary><div className="agenda-filter-options agenda-hour-options">{Array.from({length:24},(_,hour)=><label key={hour}><input type="checkbox" checked={hourFilters.includes(hour)} onChange={()=>toggleHour(hour)}/><span>{String(hour).padStart(2,'0')}:00</span></label>)}{hourFilters.length>0&&<button className="link-button" onClick={()=>setHourFilters([])}>Limpar seleção</button>}</div></details></div>
       <div className="agenda-weekdays">{['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'].map(day=><span key={day}>{day}</span>)}</div>
       <div className="agenda-month-grid">{cells.map((day:Date|null,index:number)=>day?<button key={agendaDateKey(day)} className={`agenda-day ${agendaDateKey(day)===selectedDay?'selected':''} ${agendaDateKey(day)===agendaDateKey(new Date())?'today':''}`} onClick={()=>setSelectedDay(agendaDateKey(day))}><span>{day.getDate()}</span>{countByDay.get(agendaDateKey(day))?<small>{countByDay.get(agendaDateKey(day))} post{countByDay.get(agendaDateKey(day))===1?'':'s'}</small>:null}</button>:<span key={`blank-${index}`} className="agenda-day-blank"/>)}</div>
     </div>

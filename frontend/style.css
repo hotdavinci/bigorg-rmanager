@@ -39,7 +39,10 @@
 .agenda-post-chip time{min-width:42px}
 @media(max-width:700px){.agenda-hour > div{grid-template-columns:1fr}}
 
-.agenda-filters{display:flex;flex-wrap:wrap;gap:12px;margin-top:18px}
-.agenda-filters label{display:grid;gap:5px;min-width:220px;color:#b9b8ca;font-size:12px;font-weight:700}
-.agenda-filters select{width:100%;min-height:38px}
-@media(max-width:700px){.agenda-filters{display:grid}.agenda-filters label{min-width:0}}
+.agenda-filters{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px;position:relative;z-index:2}
+.agenda-filter-menu{position:relative;min-width:210px}
+.agenda-filter-menu summary{list-style:none;cursor:pointer;min-height:39px;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:0 12px;border:1px solid #46415f;border-radius:9px;background:#242438;color:#f1effb;font-weight:800;font-size:13px}
+.agenda-filter-menu summary::-webkit-details-marker{display:none}.agenda-filter-menu summary:after{content:'⌄';font-size:16px;color:#c8b9ff}.agenda-filter-menu[open] summary{border-color:#9068ff;border-bottom-left-radius:0;border-bottom-right-radius:0}
+.agenda-filter-options{position:absolute;top:100%;left:0;min-width:100%;max-height:300px;overflow:auto;display:grid;gap:2px;padding:7px;border:1px solid #9068ff;border-top:0;border-radius:0 0 9px 9px;background:#1c1c2c;box-shadow:0 15px 30px #070710aa}
+.agenda-filter-options label{display:flex;align-items:center;gap:8px;min-width:0;padding:8px;border-radius:7px;color:#dedbea;font-size:13px;cursor:pointer}.agenda-filter-options label:hover{background:#30284d}.agenda-filter-options input{accent-color:#966dff}.agenda-hour-options{grid-template-columns:repeat(3,minmax(74px,1fr));min-width:290px}.agenda-hour-options label{padding:6px}.agenda-filter-options .link-button{border:0;background:transparent;color:#c8b9ff;text-align:left;padding:7px;cursor:pointer;font-weight:800}
+@media(max-width:700px){.agenda-filters{display:grid}.agenda-filter-menu{min-width:0}.agenda-hour-options{grid-template-columns:repeat(3,minmax(0,1fr));min-width:100%}}
