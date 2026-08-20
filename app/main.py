@@ -717,29 +717,16 @@ async def oauth_callback(code:str|None=None,state:str|None=None,error:str|None=N
         commit_with_retry(s)
         return HTMLResponse("<script>window.opener&&window.opener.location.reload();window.close()</script><h2>Conta conectada com sucesso.</h2><p>Você já pode fechar esta janela e voltar ao Reels Manager.</p>")
     except HTTPException as e: return HTMLResponse(f"<h2>Não foi possível conectar a conta.</h2><p>{e.detail}</p>",e.status_code)
-@app.delete("/api/meta/accounts")
-def remove_accounts_bulk(account_ids:list[int]=Body(...),s:Session=Depends(db)):
-    ids=list(dict.fromkeys(account_ids))
-    if not ids: raise HTTPException(400,"Select at least one account")
-    removed=[]; missing=[]
-    for account_id in ids:
-        item=s.get(InstagramAccount,account_id)
-        if not item: missing.append(account_id); continue
-        campaign_ids=list(s.scalars(select(CampaignAccount.campaign_id).where(CampaignAccount.account_id==account_id)))
-        s.query(ScheduledPost).filter(ScheduledPost.account_id==account_id,ScheduledPost.status.in_([PostStatus.PENDING,PostStatus.CLAIMED,PostStatus.PAUSED])).update({ScheduledPost.status:PostStatus.CANCELLED},synchronize_session=False)
-        s.execute(delete(CampaignAccount).where(CampaignAccount.account_id==account_id))
-        s.execute(delete(CampaignAccountExclusion).where(CampaignAccountExclusion.account_id==account_id))
-        for campaign_id in campaign_ids:
-            if not s.scalar(select(func.count()).select_from(CampaignAccount).where(CampaignAccount.campaign_id==campaign_id)):
-                campaign=s.get(Campaign,campaign_id)
-                if campaign and campaign.status==CampaignStatus.ACTIVE: campaign.status=CampaignStatus.PAUSED
-        s.delete(item); removed.append(account_id)
-    s.commit(); return {"removed":removed,"missing":missing}
-@app.delete("/api/meta/accounts/{account_id}")
-def remove_account(account_id:int,s:Session=Depends(db)):
-    item=s.get(InstagramAccount,account_id)
-    if not item: raise HTTPException(404,"Conta não encontrada")
+def delete_account_safely(s: Session, item: InstagramAccount) -> list[str]:
+    """Remove dependencies that SQLite does not cascade, preserving post history."""
+    account_id=item.id
     campaign_ids=list(s.scalars(select(CampaignAccount.campaign_id).where(CampaignAccount.account_id==account_id)))
+    reels=list(s.scalars(select(InstagramReel).where(InstagramReel.account_id==account_id)))
+    reel_ids=[reel.id for reel in reels]
+    cached_paths=[path for reel in reels for path in (reel.cached_thumbnail_path,reel.cached_video_path) if path]
+    if reel_ids:
+        s.execute(delete(InstagramReelSnapshot).where(InstagramReelSnapshot.reel_id.in_(reel_ids)))
+    s.execute(delete(InstagramReel).where(InstagramReel.account_id==account_id))
     s.query(ScheduledPost).filter(ScheduledPost.account_id==account_id,ScheduledPost.status.in_([PostStatus.PENDING,PostStatus.CLAIMED,PostStatus.PAUSED])).update({ScheduledPost.status:PostStatus.CANCELLED},synchronize_session=False)
     s.execute(delete(CampaignAccount).where(CampaignAccount.account_id==account_id))
     s.execute(delete(CampaignAccountExclusion).where(CampaignAccountExclusion.account_id==account_id))
@@ -747,7 +734,36 @@ def remove_account(account_id:int,s:Session=Depends(db)):
         if not s.scalar(select(func.count()).select_from(CampaignAccount).where(CampaignAccount.campaign_id==campaign_id)):
             campaign=s.get(Campaign,campaign_id)
             if campaign and campaign.status==CampaignStatus.ACTIVE: campaign.status=CampaignStatus.PAUSED
-    s.delete(item);s.commit();return {"ok":True}
+    audit(s,"ACCOUNT_REMOVED","Conta removida manualmente; vínculos e agendamentos futuros foram cancelados.",account_id=account_id)
+    s.delete(item)
+    return cached_paths
+
+def remove_cached_insight_files(paths: list[str]) -> None:
+    for relative_path in set(paths):
+        try:
+            path=data_path(relative_path)
+            if path.is_file(): path.unlink()
+        except OSError:
+            pass
+
+@app.delete("/api/meta/accounts")
+def remove_accounts_bulk(account_ids:list[int]=Body(...),s:Session=Depends(db)):
+    ids=list(dict.fromkeys(account_ids))
+    if not ids: raise HTTPException(400,"Selecione ao menos uma conta")
+    removed=[]; missing=[]; cached_paths=[]
+    for account_id in ids:
+        item=s.get(InstagramAccount,account_id)
+        if not item: missing.append(account_id); continue
+        cached_paths.extend(delete_account_safely(s,item)); removed.append(account_id)
+    commit_with_retry(s); remove_cached_insight_files(cached_paths)
+    return {"removed":removed,"missing":missing}
+@app.delete("/api/meta/accounts/{account_id}")
+def remove_account(account_id:int,s:Session=Depends(db)):
+    item=s.get(InstagramAccount,account_id)
+    if not item: raise HTTPException(404,"Conta não encontrada")
+    cached_paths=delete_account_safely(s,item)
+    commit_with_retry(s); remove_cached_insight_files(cached_paths)
+    return {"ok":True}
 @app.get("/api/dashboard")
 def dashboard(s:Session=Depends(db)):
     now=datetime.utcnow()
