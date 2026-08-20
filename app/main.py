@@ -765,10 +765,36 @@ def remove_account(account_id:int,s:Session=Depends(db)):
     commit_with_retry(s); remove_cached_insight_files(cached_paths)
     return {"ok":True}
 @app.get("/api/dashboard")
-def dashboard(s:Session=Depends(db)):
-    now=datetime.utcnow()
-    aptas=sum(1 for account in s.scalars(select(InstagramAccount)) if account_is_eligible(account,now))
-    return {"contas_aptas":aptas,"originais":s.query(Media).filter_by(kind="original").count(),"processadas":s.query(Media).filter_by(kind="processed").count(),"campanhas_ativas":s.query(Campaign).filter_by(status=CampaignStatus.ACTIVE).count(),"pendentes":s.query(ScheduledPost).filter_by(status=PostStatus.PENDING).count(),"proximas":[{"id":p.id,"quando":p.scheduled_for,"legenda":p.caption} for p in s.scalars(select(ScheduledPost).order_by(ScheduledPost.scheduled_for).limit(5))]}
+def dashboard(period:str="total",s:Session=Depends(db)):
+    now=datetime.utcnow(); windows={"24h":timedelta(hours=24),"7d":timedelta(days=7),"30d":timedelta(days=30)}
+    period=period if period in {"total",*windows} else "total"; cutoff=now-windows[period] if period in windows else None
+    healthy=[account for account in s.scalars(select(InstagramAccount)) if account_is_eligible(account,now)]
+    healthy_ids={account.id for account in healthy}
+    posts=[post for post in s.scalars(select(ScheduledPost)) if post.account_id in healthy_ids]
+    queued={PostStatus.PENDING,PostStatus.CLAIMED,PostStatus.UPLOADING,PostStatus.WAITING_META,PostStatus.PUBLISHING}
+    future=[post for post in posts if post.status in queued and post.scheduled_for>=now and (not cutoff or post.scheduled_for<=now+windows[period])]
+    pending=[post for post in future if post.status==PostStatus.PENDING]
+    published=[post for post in posts if post.status==PostStatus.PUBLISHED and (not cutoff or cutoff<=post.scheduled_for<=now)]
+    upcoming=sorted(future,key=lambda post:post.scheduled_for)[:5]
+    return {"period":period,"contas_aptas":len(healthy),"agendados":len(future),"pendentes":len(pending),"publicados":len(published),"proximas":[{"id":post.id,"quando":post.scheduled_for,"legenda":post.caption} for post in upcoming]}
+
+@app.get("/api/insights/views-chart")
+def insight_views_chart(start:str|None=None,end:str|None=None,s:Session=Depends(db)):
+    """Daily current views of Reels published in the requested inclusive date range."""
+    today=datetime.utcnow().date()
+    try: start_date=date.fromisoformat(start) if start else today
+    except ValueError: raise HTTPException(422,"Data inicial inválida")
+    try: end_date=date.fromisoformat(end) if end else today
+    except ValueError: raise HTTPException(422,"Data final inválida")
+    if end_date<start_date: raise HTTPException(422,"A data final deve ser igual ou posterior à inicial")
+    if (end_date-start_date).days>366: raise HTTPException(422,"Escolha um intervalo de até 366 dias")
+    healthy_ids={account.id for account in s.scalars(select(InstagramAccount)) if account_is_eligible(account)}
+    totals={start_date+timedelta(days=index):0 for index in range((end_date-start_date).days+1)}
+    for reel in s.scalars(select(InstagramReel)):
+        if reel.account_id not in healthy_ids or not reel.published_at: continue
+        published_day=reel.published_at.date()
+        if published_day in totals: totals[published_day]+=reel.views
+    return {"start":start_date.isoformat(),"end":end_date.isoformat(),"points":[{"date":day.isoformat(),"views":views} for day,views in totals.items()]}
 @app.get("/api/scheduled-posts")
 def scheduled_posts(s:Session=Depends(db)):
     posts=s.scalars(select(ScheduledPost).order_by(ScheduledPost.scheduled_for)).all()
