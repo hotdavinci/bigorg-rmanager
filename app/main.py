@@ -52,7 +52,7 @@ def cancel_account_from_active_campaigns(session: Session, account: InstagramAcc
         count=session.query(ScheduledPost).filter(
             ScheduledPost.campaign_id==campaign_id, ScheduledPost.account_id==account.id,
             ScheduledPost.scheduled_for>now,
-            ScheduledPost.status.in_([PostStatus.PENDING,PostStatus.CLAIMED,PostStatus.PAUSED])
+            ScheduledPost.status.in_([PostStatus.PENDING,PostStatus.CLAIMED,PostStatus.UPLOADING,PostStatus.WAITING_META,PostStatus.PUBLISHING,PostStatus.PAUSED])
         ).update({ScheduledPost.status:PostStatus.CANCELLED},synchronize_session=False)
         cancelled+=count
         excluded=session.scalar(select(CampaignAccountExclusion).where(CampaignAccountExclusion.campaign_id==campaign_id,CampaignAccountExclusion.account_id==account.id))
@@ -727,7 +727,7 @@ def delete_account_safely(s: Session, item: InstagramAccount) -> list[str]:
     if reel_ids:
         s.execute(delete(InstagramReelSnapshot).where(InstagramReelSnapshot.reel_id.in_(reel_ids)))
     s.execute(delete(InstagramReel).where(InstagramReel.account_id==account_id))
-    s.query(ScheduledPost).filter(ScheduledPost.account_id==account_id,ScheduledPost.status.in_([PostStatus.PENDING,PostStatus.CLAIMED,PostStatus.PAUSED])).update({ScheduledPost.status:PostStatus.CANCELLED},synchronize_session=False)
+    s.query(ScheduledPost).filter(ScheduledPost.account_id==account_id,ScheduledPost.status.in_([PostStatus.PENDING,PostStatus.CLAIMED,PostStatus.UPLOADING,PostStatus.WAITING_META,PostStatus.PUBLISHING,PostStatus.PAUSED])).update({ScheduledPost.status:PostStatus.CANCELLED},synchronize_session=False)
     s.execute(delete(CampaignAccount).where(CampaignAccount.account_id==account_id))
     s.execute(delete(CampaignAccountExclusion).where(CampaignAccountExclusion.account_id==account_id))
     for campaign_id in campaign_ids:
