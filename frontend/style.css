@@ -28,3 +28,4 @@
 .insight-values{display:flex;gap:14px;margin-top:8px;color:#bdb9d5;font-size:13px}.insight-values span{display:inline-flex;align-items:center;gap:5px}.insight-values svg{color:#c4b5fd}
 @media(max-width:680px){.insight-metrics{grid-template-columns:repeat(2,1fr)}.insight-row{align-items:flex-start}.insight-row .secondary{padding:8px 10px;font-size:12px}}
 .library-note{color:#aaa8c7;margin:-5px 0 16px;font-size:13px}
+.campaign-end-date{color:#bdb9d5!important;margin-top:7px!important;font-weight:400!important}.campaign-end-date b{color:#e7e2ff}

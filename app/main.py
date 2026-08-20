@@ -584,7 +584,9 @@ def remove_account(account_id:int,s:Session=Depends(db)):
     s.delete(item);s.commit();return {"ok":True}
 @app.get("/api/dashboard")
 def dashboard(s:Session=Depends(db)):
-    return {"originais":s.query(Media).filter_by(kind="original").count(),"processadas":s.query(Media).filter_by(kind="processed").count(),"campanhas_ativas":s.query(Campaign).filter_by(status=CampaignStatus.ACTIVE).count(),"pendentes":s.query(ScheduledPost).filter_by(status=PostStatus.PENDING).count(),"proximas":[{"id":p.id,"quando":p.scheduled_for,"legenda":p.caption} for p in s.scalars(select(ScheduledPost).order_by(ScheduledPost.scheduled_for).limit(5))]}
+    now=datetime.utcnow()
+    aptas=sum(1 for account in s.scalars(select(InstagramAccount)) if account_is_eligible(account,now))
+    return {"contas_aptas":aptas,"originais":s.query(Media).filter_by(kind="original").count(),"processadas":s.query(Media).filter_by(kind="processed").count(),"campanhas_ativas":s.query(Campaign).filter_by(status=CampaignStatus.ACTIVE).count(),"pendentes":s.query(ScheduledPost).filter_by(status=PostStatus.PENDING).count(),"proximas":[{"id":p.id,"quando":p.scheduled_for,"legenda":p.caption} for p in s.scalars(select(ScheduledPost).order_by(ScheduledPost.scheduled_for).limit(5))]}
 @app.get("/api/scheduled-posts")
 def scheduled_posts(s:Session=Depends(db)):
     posts=s.scalars(select(ScheduledPost).order_by(ScheduledPost.scheduled_for)).all()
