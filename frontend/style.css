@@ -38,3 +38,8 @@
 .agenda-post-chip{gap:9px;padding:9px 10px}
 .agenda-post-chip time{min-width:42px}
 @media(max-width:700px){.agenda-hour > div{grid-template-columns:1fr}}
+
+.agenda-filters{display:flex;flex-wrap:wrap;gap:12px;margin-top:18px}
+.agenda-filters label{display:grid;gap:5px;min-width:220px;color:#b9b8ca;font-size:12px;font-weight:700}
+.agenda-filters select{width:100%;min-height:38px}
+@media(max-width:700px){.agenda-filters{display:grid}.agenda-filters label{min-width:0}}
