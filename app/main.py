@@ -70,8 +70,11 @@ def parse_intervals(values: list[str]):
     ranges=[]
     for item in values:
         left,right=item.split("-"); start=datetime.strptime(left.strip(),"%H:%M").time(); end=datetime.strptime(right.strip(),"%H:%M").time()
-        if start>=end: raise ValueError(f"Intervalo inválido: {item}")
-        ranges.append((start,end))
+        low=start.hour*60+start.minute; high=end.hour*60+end.minute
+        if low==high: raise ValueError(f"Intervalo inválido: {item}. O início e o fim não podem ser iguais")
+        # 23:00-00:00 and 23:30-01:00 are valid ranges crossing midnight.
+        if high<low: high+=24*60
+        ranges.append((low,high))
     return ranges
 
 def _clone_processed_for_schedule(session: Session, campaign_id: int, original_media_id: int, seed_media: Media, account_id: int, position: int) -> Media:
@@ -106,13 +109,12 @@ def materialize_missing_schedule_for_account(session: Session, campaign: Campaig
     created=0
     for day_offset in range(rule.days):
         current=start_date+timedelta(days=day_offset)
-        for range_index,(start,end) in enumerate(ranges):
+        for range_index,(low,high) in enumerate(ranges):
             position=day_offset*1000+range_index
             if position in existing_positions: continue
-            low=start.hour*60+start.minute; high=end.hour*60+end.minute
             # Stable randomness means a restart calculates the same occurrence.
             rng=random.Random(f"campaign:{campaign.id}:account:{account.id}:slot:{position}")
-            minute=rng.randint(low,high); when=datetime.combine(current,time(minute//60,minute%60))
+            minute=rng.randint(low,high); when=datetime.combine(current,time())+timedelta(minutes=minute)
             if when<=now: continue
             source_id=rng.choice(sources) if rule.strategy=="random" else sources[position%len(sources)]
             seeds=list(session.scalars(select(Media).where(Media.kind=="processed",Media.original_media_id==source_id)))
@@ -1140,8 +1142,10 @@ def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(
         for left,right in matches:
             try:
                 a=datetime.strptime(left,"%H:%M").time(); b=datetime.strptime(right,"%H:%M").time()
-                if a>=b: raise ValueError()
-                ranges.append((a,b))
+                low=a.hour*60+a.minute; high=b.hour*60+b.minute
+                if low==high: raise ValueError()
+                if high<low: high+=24*60
+                ranges.append((low,high))
             except ValueError: raise HTTPException(422,f"Intervalo inválido: {left}-{right}. Use HH:MM-HH:MM")
     post_ids=select(ScheduledPost.id).where(ScheduledPost.campaign_id==campaign_id)
     s.execute(delete(ScheduledPostCover).where(ScheduledPostCover.post_id.in_(post_ids)))
@@ -1155,8 +1159,7 @@ def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(
     for day_offset in range(body.days):
         current=body.start_date+timedelta(days=day_offset)
         if current<date.today(): continue
-        for start,end in ranges:
-            low=start.hour*60+start.minute; high=end.hour*60+end.minute
+        for low,high in ranges:
             for account_id in accounts:
                 if current==date.today():
                     earliest=datetime.now()+timedelta(minutes=5)
@@ -1199,7 +1202,7 @@ def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(
                     data_path(media.relative_path).unlink(missing_ok=True); s.delete(media)
                     if cover_data: data_path(cover_data[0]).unlink(missing_ok=True)
                     continue
-                minute=random.randint(effective_low,job["high"]); when=datetime.combine(job["current"],time(minute//60,minute%60))
+                minute=random.randint(effective_low,job["high"]); when=datetime.combine(job["current"],time())+timedelta(minutes=minute)
                 post=ScheduledPost(campaign_id=campaign_id,account_id=job["account_id"],processed_media_id=media.id,caption=job["caption"],scheduled_for=when,position=position)
                 s.add(post); s.flush()
                 if cover_data:
