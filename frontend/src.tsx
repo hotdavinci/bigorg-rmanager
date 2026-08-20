@@ -225,7 +225,7 @@ function AgendaCalendar({agenda,month,setMonth,selectedDay,setSelectedDay,retryN
   const monthStart=new Date(month.getFullYear(),month.getMonth(),1);
   const monthEnd=new Date(month.getFullYear(),month.getMonth()+1,0);
   const monthLabel=monthStart.toLocaleDateString('pt-BR',{month:'long',year:'numeric'});
-  const allPosts=agenda.map((post:any)=>({...post,date:new Date(post.quando)})).filter((post:any)=>!Number.isNaN(post.date.getTime()));
+  const allPosts=agenda.map((post:any)=>({...post,date:new Date(post.quando)})).filter((post:any)=>post.conta_apta!==false&&!Number.isNaN(post.date.getTime()));
   const accountNames=[...new Set(allPosts.map((post:any)=>post.conta).filter(Boolean))].sort() as string[];
   const posts=allPosts.filter((post:any)=>(!accountFilters.length||accountFilters.includes(post.conta))&&(!hourFilters.length||hourFilters.includes(post.date.getHours())));
   const toggleAccount=(name:string)=>setAccountFilters(current=>current.includes(name)?current.filter(item=>item!==name):[...current,name]);

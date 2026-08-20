@@ -779,6 +779,7 @@ def scheduled_posts(s:Session=Depends(db)):
             "id":p.id, "quando":p.scheduled_for, "status":p.status,
             "campanha":s.get(Campaign,p.campaign_id).name if s.get(Campaign,p.campaign_id) else "",
             "conta":s.get(InstagramAccount,p.account_id).username if s.get(InstagramAccount,p.account_id) else "",
+            "conta_apta":bool(s.get(InstagramAccount,p.account_id) and account_is_eligible(s.get(InstagramAccount,p.account_id))),
             "midia":s.get(Media,p.processed_media_id).original_name if s.get(Media,p.processed_media_id) else "",
             "erro":attempt.message if p.status==PostStatus.FAILED and attempt and attempt.status=="FAILED" else "",
         })
