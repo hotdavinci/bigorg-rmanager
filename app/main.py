@@ -792,7 +792,7 @@ def dashboard(period:str="total",s:Session=Depends(db)):
 @app.get("/api/insights/views-chart")
 def insight_views_chart(period:str="24h",start:str|None=None,end:str|None=None,s:Session=Depends(db)):
     """Current views grouped by Reel publication hour/day for the chosen period."""
-    now=datetime.utcnow(); healthy_ids={account.id for account in s.scalars(select(InstagramAccount)) if account_is_eligible(account)}
+    now=datetime.utcnow()
     if period=="24h":
         first=(now.replace(minute=0,second=0,microsecond=0)-timedelta(hours=23)); totals={first+timedelta(hours=index):0 for index in range(24)}; cutoff=first
         def bucket(value:datetime): return value.replace(minute=0,second=0,microsecond=0)
@@ -809,7 +809,9 @@ def insight_views_chart(period:str="24h",start:str|None=None,end:str|None=None,s
         totals={start_date+timedelta(days=index):0 for index in range((end_date-start_date).days+1)}; cutoff=datetime.combine(start_date,time.min)
         def bucket(value:datetime): return value.date()
     for reel in s.scalars(select(InstagramReel)):
-        if reel.account_id not in healthy_ids or not reel.published_at or reel.published_at<cutoff: continue
+        # Insights são um histórico: Reels já publicados continuam no gráfico
+        # mesmo se a conta cair depois. Só a fila operacional exclui contas inaptas.
+        if not reel.published_at or reel.published_at<cutoff: continue
         key=bucket(reel.published_at)
         if key in totals: totals[key]+=reel.views
     return {"period":period,"points":[{"date":key.isoformat(),"views":views} for key,views in totals.items()]}
