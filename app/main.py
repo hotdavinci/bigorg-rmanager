@@ -779,22 +779,29 @@ def dashboard(period:str="total",s:Session=Depends(db)):
     return {"period":period,"contas_aptas":len(healthy),"agendados":len(future),"pendentes":len(pending),"publicados":len(published),"proximas":[{"id":post.id,"quando":post.scheduled_for,"legenda":post.caption} for post in upcoming]}
 
 @app.get("/api/insights/views-chart")
-def insight_views_chart(start:str|None=None,end:str|None=None,s:Session=Depends(db)):
-    """Daily current views of Reels published in the requested inclusive date range."""
-    today=datetime.utcnow().date()
-    try: start_date=date.fromisoformat(start) if start else today
-    except ValueError: raise HTTPException(422,"Data inicial inválida")
-    try: end_date=date.fromisoformat(end) if end else today
-    except ValueError: raise HTTPException(422,"Data final inválida")
-    if end_date<start_date: raise HTTPException(422,"A data final deve ser igual ou posterior à inicial")
-    if (end_date-start_date).days>366: raise HTTPException(422,"Escolha um intervalo de até 366 dias")
-    healthy_ids={account.id for account in s.scalars(select(InstagramAccount)) if account_is_eligible(account)}
-    totals={start_date+timedelta(days=index):0 for index in range((end_date-start_date).days+1)}
+def insight_views_chart(period:str="24h",start:str|None=None,end:str|None=None,s:Session=Depends(db)):
+    """Current views grouped by Reel publication hour/day for the chosen period."""
+    now=datetime.utcnow(); healthy_ids={account.id for account in s.scalars(select(InstagramAccount)) if account_is_eligible(account)}
+    if period=="24h":
+        first=(now.replace(minute=0,second=0,microsecond=0)-timedelta(hours=23)); totals={first+timedelta(hours=index):0 for index in range(24)}; cutoff=first
+        def bucket(value:datetime): return value.replace(minute=0,second=0,microsecond=0)
+    elif period in {"7d","30d"}:
+        days=7 if period=="7d" else 30; first=(now.date()-timedelta(days=days-1)); totals={first+timedelta(days=index):0 for index in range(days)}; cutoff=datetime.combine(first,time.min)
+        def bucket(value:datetime): return value.date()
+    else:
+        try: start_date=date.fromisoformat(start) if start else now.date()
+        except ValueError: raise HTTPException(422,"Data inicial inválida")
+        try: end_date=date.fromisoformat(end) if end else start_date
+        except ValueError: raise HTTPException(422,"Data final inválida")
+        if end_date<start_date: raise HTTPException(422,"A data final deve ser igual ou posterior à inicial")
+        if (end_date-start_date).days>366: raise HTTPException(422,"Escolha um intervalo de até 366 dias")
+        totals={start_date+timedelta(days=index):0 for index in range((end_date-start_date).days+1)}; cutoff=datetime.combine(start_date,time.min)
+        def bucket(value:datetime): return value.date()
     for reel in s.scalars(select(InstagramReel)):
-        if reel.account_id not in healthy_ids or not reel.published_at: continue
-        published_day=reel.published_at.date()
-        if published_day in totals: totals[published_day]+=reel.views
-    return {"start":start_date.isoformat(),"end":end_date.isoformat(),"points":[{"date":day.isoformat(),"views":views} for day,views in totals.items()]}
+        if reel.account_id not in healthy_ids or not reel.published_at or reel.published_at<cutoff: continue
+        key=bucket(reel.published_at)
+        if key in totals: totals[key]+=reel.views
+    return {"period":period,"points":[{"date":key.isoformat(),"views":views} for key,views in totals.items()]}
 @app.get("/api/scheduled-posts")
 def scheduled_posts(s:Session=Depends(db)):
     posts=s.scalars(select(ScheduledPost).order_by(ScheduledPost.scheduled_for)).all()
