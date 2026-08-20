@@ -4,6 +4,7 @@ from datetime import datetime, date, time, timedelta
 import random
 from pathlib import Path
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 import httpx
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, Body
 from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse
@@ -181,7 +182,10 @@ def as_local_datetime(value: str|None) -> datetime|None:
         # accepts the ISO form +00:00, otherwise publication dates become NULL
         # and every 24h/7d/30d filter is inevitably empty.
         if re.search(r"[+-]\d{4}$",normalized): normalized=f"{normalized[:-2]}:{normalized[-2:]}"
-        return datetime.fromisoformat(normalized).replace(tzinfo=None)
+        parsed=datetime.fromisoformat(normalized)
+        if parsed.tzinfo:
+            return parsed.astimezone(ZoneInfo("America/Sao_Paulo")).replace(tzinfo=None)
+        return parsed
     except ValueError: return None
 
 async def cache_reel_thumbnail(reel: InstagramReel, source_url: str) -> None:
