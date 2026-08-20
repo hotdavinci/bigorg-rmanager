@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, date, time, timedelta
 import random
 from pathlib import Path
+from urllib.parse import urlparse
 import httpx
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, Body
 from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse
@@ -168,7 +169,13 @@ def sync_due_connected_accounts(session: Session) -> dict:
 
 def as_local_datetime(value: str|None) -> datetime|None:
     if not value: return None
-    try: return datetime.fromisoformat(value.replace("Z","+00:00")).replace(tzinfo=None)
+    try:
+        normalized=value.replace("Z","+00:00")
+        # Meta returns offsets such as +0000. Python's parser on this VPS only
+        # accepts the ISO form +00:00, otherwise publication dates become NULL
+        # and every 24h/7d/30d filter is inevitably empty.
+        if re.search(r"[+-]\d{4}$",normalized): normalized=f"{normalized[:-2]}:{normalized[-2:]}"
+        return datetime.fromisoformat(normalized).replace(tzinfo=None)
     except ValueError: return None
 
 async def cache_reel_thumbnail(reel: InstagramReel, source_url: str) -> None:
@@ -178,6 +185,36 @@ async def cache_reel_thumbnail(reel: InstagramReel, source_url: str) -> None:
     deliberately retain the last good image rather than making an old Reel blank.
     """
     if not source_url:
+        return
+
+async def cache_reel_video(reel: InstagramReel, source_url: str) -> None:
+    """Download a winner's official media URL once, while the CDN URL is valid."""
+    if not source_url or (reel.cached_video_path and data_path(reel.cached_video_path).is_file()):
+        return
+    safe_id=re.sub(r"[^a-zA-Z0-9_-]", "_", reel.meta_media_id)
+    extension=Path(urlparse(source_url).path).suffix.lower() or ".mp4"
+    if extension not in {".mp4", ".mov"}: extension=".mp4"
+    relative=Path("insights") / "videos" / f"reel-{reel.account_id}-{safe_id}{extension}"
+    target=data_path(relative)
+    try:
+        async with httpx.AsyncClient(timeout=180, follow_redirects=True) as client:
+            async with client.stream("GET",source_url) as response:
+                content_type=response.headers.get("content-type", "").lower()
+                if response.status_code!=200 or not content_type.startswith("video/"):
+                    return
+                target.parent.mkdir(parents=True,exist_ok=True)
+                temporary=target.with_suffix(target.suffix+".tmp")
+                total=0
+                with temporary.open("wb") as output:
+                    async for chunk in response.aiter_bytes(1024*1024):
+                        total+=len(chunk)
+                        if total>500*1024*1024:
+                            output.close(); temporary.unlink(missing_ok=True); return
+                        output.write(chunk)
+        if target.with_suffix(target.suffix+".tmp").is_file():
+            target.with_suffix(target.suffix+".tmp").replace(target)
+            reel.cached_video_path=str(relative).replace("\\", "/")
+    except (httpx.HTTPError,OSError):
         return
     safe_id=re.sub(r"[^a-zA-Z0-9_-]", "_", reel.meta_media_id)
     relative=Path("insights") / "thumbnails" / f"reel-{reel.account_id}-{safe_id}.jpg"
@@ -225,7 +262,7 @@ def archive_published_reel_video(session: Session, account_id: int, meta_media_i
         return
 
 async def sync_reel_insights(session: Session) -> dict:
-    synced=unsupported=0
+    synced=unsupported=0; video_candidates=[]
     # Insights are independent from publishing health. An account may publish
     # normally while its token does not have the insights scope yet.
     for account in session.scalars(select(InstagramAccount).where(InstagramAccount.active==True)):
@@ -237,12 +274,22 @@ async def sync_reel_insights(session: Session) -> dict:
                     reel=InstagramReel(account_id=account.id,meta_media_id=str(item["id"])); session.add(reel); session.flush()
                 reel.caption=str(item.get("caption") or ""); reel.permalink=str(item.get("permalink") or ""); reel.thumbnail_url=str(item.get("thumbnail_url") or ""); reel.video_url=str(item.get("media_url") or ""); reel.published_at=as_local_datetime(item.get("timestamp")); reel.views=int(item.get("views") or 0); reel.likes=int(item.get("like_count") or 0); reel.comments=int(item.get("comments_count") or 0); reel.synced_at=datetime.utcnow()
                 await cache_reel_thumbnail(reel,reel.thumbnail_url)
+                video_candidates.append((reel,reel.video_url,reel.views))
                 session.add(InstagramReelSnapshot(reel_id=reel.id,views=reel.views,likes=reel.likes,comments=reel.comments))
                 synced+=1
             account.last_insights_error=""
         except Exception as exc:
             # Keep the account publishable; just expose the unavailable insights.
             account.last_insights_error=str(exc)[:1000]; unsupported+=1
+    # Only retain the globally configured winners. The file is downloaded from
+    # Meta now, then served locally even if its CDN URL or the Reel disappears.
+    winner_settings=saved_insight_winner_settings(session)
+    kept=0
+    for reel,url,_ in sorted(video_candidates,key=lambda item:item[2],reverse=True):
+        if reel.views<winner_settings["minimum_views"]: continue
+        if kept>=winner_settings["limit"]: break
+        await cache_reel_video(reel,url)
+        if reel.cached_video_path and data_path(reel.cached_video_path).is_file(): kept+=1
     session.commit(); return {"synced":synced,"unsupported":unsupported}
 
 async def run_insights_sync_if_due(force: bool=False) -> dict|None:
@@ -748,20 +795,12 @@ def insight_reels(period:str="total",s:Session=Depends(db)):
     published_attempts={str(attempt.meta_media_id):attempt for attempt in s.scalars(select(PublicationAttempt).where(PublicationAttempt.status=="PUBLISHED",PublicationAttempt.meta_media_id!=""))}
     for reel in s.scalars(select(InstagramReel)).all():
         account=s.get(InstagramAccount,reel.account_id)
-        baseline=None
-        if cutoff:
-            baseline=s.execute(select(InstagramReelSnapshot.views,InstagramReelSnapshot.likes,InstagramReelSnapshot.comments).where(InstagramReelSnapshot.reel_id==reel.id,InstagramReelSnapshot.captured_at<=cutoff).order_by(InstagramReelSnapshot.captured_at.desc())).first()
-        # If a Reel was published inside the chosen window, all of its current
-        # numbers belong to that window even before the first snapshot exists.
-        # For older Reels without a historical reading, do not invent zero growth.
-        published_inside_window=bool(cutoff and reel.published_at and reel.published_at>=cutoff)
-        baseline_available=bool(baseline or published_inside_window or not cutoff)
-        if baseline:
-            base_views,base_likes,base_comments=baseline
-        elif published_inside_window:
-            base_views,base_likes,base_comments=0,0,0
-        else:
-            base_views,base_likes,base_comments=reel.views,reel.likes,reel.comments
+        # The period selector is deliberately based on when the Reel was
+        # published, then uses its current official totals. This works from the
+        # first sync; snapshot deltas cannot honestly calculate 7/30 days until
+        # the application itself has accumulated that much history.
+        if cutoff and (not reel.published_at or reel.published_at<cutoff):
+            continue
         library_media=None
         # Reels publicados por este sistema trazem o ID da Meta na tentativa de
         # publicação. Daí percorremos post -> processado -> original, sem usar
@@ -773,15 +812,11 @@ def insight_reels(period:str="total",s:Session=Depends(db)):
             original=s.get(Media,processed.original_media_id) if processed and processed.original_media_id else None
             if original and original.kind=="original":
                 library_media={"id":original.id,"name":original.original_name,"thumbnail_url":f"/api/media/{original.id}/thumbnail","video_url":f"/api/media/{original.id}/stream"}
-        growth=max(0,reel.views-base_views) if cutoff and baseline_available else reel.views
-        likes_value=max(0,reel.likes-base_likes) if cutoff and baseline_available else reel.likes
-        comments_value=max(0,reel.comments-base_comments) if cutoff and baseline_available else reel.comments
-        rows.append({"id":reel.id,"meta_media_id":reel.meta_media_id,"conta":account.username if account else "conta removida","caption":reel.caption,"permalink":reel.permalink,"thumbnail_url":reel.thumbnail_url,"cached_thumbnail_url":f"/api/insights/reels/{reel.id}/thumbnail" if reel.cached_thumbnail_path else "","cached_video_url":f"/api/insights/reels/{reel.id}/video" if reel.cached_video_path and data_path(reel.cached_video_path).is_file() else "","library_media":library_media,"published_at":reel.published_at,"views":reel.views,"likes":reel.likes,"comments":reel.comments,"growth":growth,"likes_value":likes_value,"comments_value":comments_value,"has_baseline":baseline_available})
-    measured=[item for item in rows if item["has_baseline"]]
-    # Totals always cover every measurable Reel, independently of the card limit
-    # or the minimum used only to decide the winners list.
-    summary={"views":sum(item["growth"] for item in measured),"likes":sum(item["likes_value"] for item in measured),"comments":sum(item["comments_value"] for item in measured),"reels":len(rows),"measured_reels":len(measured),"awaiting_history":len(rows)-len(measured)}
-    ranked=[item for item in measured if item["growth"]>=winner_settings["minimum_views"]]
+        rows.append({"id":reel.id,"meta_media_id":reel.meta_media_id,"conta":account.username if account else "conta removida","caption":reel.caption,"permalink":reel.permalink,"thumbnail_url":reel.thumbnail_url,"cached_thumbnail_url":f"/api/insights/reels/{reel.id}/thumbnail" if reel.cached_thumbnail_path else "","cached_video_url":f"/api/insights/reels/{reel.id}/video" if reel.cached_video_path and data_path(reel.cached_video_path).is_file() else "","library_media":library_media,"published_at":reel.published_at,"views":reel.views,"likes":reel.likes,"comments":reel.comments,"growth":reel.views,"likes_value":reel.likes,"comments_value":reel.comments,"has_baseline":True})
+    # Totals are over every Reel selected by the chosen publication period,
+    # independently of the winner card cap/minimum.
+    summary={"views":sum(item["views"] for item in rows),"likes":sum(item["likes"] for item in rows),"comments":sum(item["comments"] for item in rows),"reels":len(rows),"measured_reels":len(rows),"awaiting_history":0}
+    ranked=[item for item in rows if item["views"]>=winner_settings["minimum_views"]]
     ranked.sort(key=lambda item:(item["growth"],item["views"]),reverse=True)
     return {"period":period,"reels":ranked[:winner_settings["limit"]],"summary":summary,"settings":winner_settings,"accounts":[{"id":account.id,"username":account.username,"error":account.last_insights_error,"synced_at":max([reel.synced_at for reel in s.scalars(select(InstagramReel).where(InstagramReel.account_id==account.id))],default=None)} for account in s.scalars(select(InstagramAccount))]}
 @app.post("/api/insights/sync")
