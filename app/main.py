@@ -46,7 +46,7 @@ def cancel_account_from_active_campaigns(session: Session, account: InstagramAcc
     account.active=False
     account.last_error=reason[:4000]
     account.last_verified_at=datetime.utcnow()
-    campaign_ids=list(session.scalars(select(CampaignAccount.campaign_id).join(Campaign).where(CampaignAccount.account_id==account.id,Campaign.status==CampaignStatus.ACTIVE)))
+    campaign_ids=list(session.scalars(select(CampaignAccount.campaign_id).join(Campaign).where(CampaignAccount.account_id==account.id,Campaign.status.in_([CampaignStatus.ACTIVE,CampaignStatus.PROCESSING]))))
     cancelled=0
     for campaign_id in campaign_ids:
         count=session.query(ScheduledPost).filter(
@@ -773,10 +773,17 @@ def dashboard(period:str="total",s:Session=Depends(db)):
     posts=[post for post in s.scalars(select(ScheduledPost)) if post.account_id in healthy_ids]
     queued={PostStatus.PENDING,PostStatus.CLAIMED,PostStatus.UPLOADING,PostStatus.WAITING_META,PostStatus.PUBLISHING}
     future=[post for post in posts if post.status in queued and post.scheduled_for>=now and (not cutoff or post.scheduled_for<=now+windows[period])]
-    pending=[post for post in future if post.status==PostStatus.PENDING]
+    # "Pendentes" no painel não são publicações esperando horário. São apenas
+    # slots que a geração ainda precisa processar e materializar no banco.
+    pending=0
+    for campaign in s.scalars(select(Campaign).where(Campaign.status==CampaignStatus.PROCESSING)):
+        linked_ids=list(s.scalars(select(CampaignAccount.account_id).where(CampaignAccount.campaign_id==campaign.id)))
+        if not any(account_id in healthy_ids for account_id in linked_ids): continue
+        progress=load_generation_progress(campaign.id) or {}
+        pending+=max(0,int(progress.get("total",0))-int(progress.get("completed",0)))
     published=[post for post in posts if post.status==PostStatus.PUBLISHED and (not cutoff or cutoff<=post.scheduled_for<=now)]
     upcoming=sorted(future,key=lambda post:post.scheduled_for)[:5]
-    return {"period":period,"contas_aptas":len(healthy),"agendados":len(future),"pendentes":len(pending),"publicados":len(published),"proximas":[{"id":post.id,"quando":post.scheduled_for,"legenda":post.caption} for post in upcoming]}
+    return {"period":period,"contas_aptas":len(healthy),"agendados":len(future),"pendentes":pending,"publicados":len(published),"proximas":[{"id":post.id,"quando":post.scheduled_for,"legenda":post.caption} for post in upcoming]}
 
 @app.get("/api/insights/views-chart")
 def insight_views_chart(period:str="24h",start:str|None=None,end:str|None=None,s:Session=Depends(db)):
@@ -1244,6 +1251,11 @@ def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(
                 save_generation_progress(campaign_id,status="CANCELLED",total=len(jobs),completed=first,scheduled=scheduled,failed=0,batch_size=batch_size,message="Campanha cancelada após concluir o lote atual.",finished_at=datetime.utcnow().isoformat())
                 return {"count":scheduled,"status":CampaignStatus.CANCELLED}
             for job,media,cover_data in results:
+                target_account=s.get(InstagramAccount,job["account_id"])
+                if not target_account or not account_is_eligible(target_account):
+                    data_path(media.relative_path).unlink(missing_ok=True); s.delete(media)
+                    if cover_data: data_path(cover_data[0]).unlink(missing_ok=True)
+                    continue
                 effective_low=job["low"]
                 if job["current"]==date.today():
                     earliest=datetime.now()+timedelta(minutes=5)
