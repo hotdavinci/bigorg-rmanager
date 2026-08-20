@@ -2,9 +2,8 @@
 .oauth-link{display:grid;gap:7px;margin-bottom:18px;padding:14px;border:1px solid #504078;border-radius:12px;background:#25213b}
 .oauth-link small{color:#c2bdd7}.oauth-link>div{display:flex;gap:10px}.oauth-link input{flex:1;min-width:0}.oauth-link button{white-space:nowrap}
 .account-list{display:grid;gap:10px}
-.account-choice{display:flex;align-items:center;gap:12px;border:1px solid #35364b;border-radius:12px;padding:14px 15px;background:#202131;cursor:pointer;transition:.15s}
+.account-choice{display:flex;align-items:center;gap:12px;border:1px solid #35364b;border-radius:12px;padding:14px 15px;background:#202131;transition:.15s}
 .account-choice:hover{background:#292a3d;border-color:#6651bc}
-.account-choice.selected-account{background:#352b57;border-color:#9b72ff}
-.account-choice input{width:18px;height:18px;accent-color:#9b6bff;cursor:pointer}
-.account-choice>span:nth-child(2){flex:1}.account-choice b{display:block}.account-choice small{display:block;color:#aaaabe;margin-top:4px}
+.account-choice>span:first-child{flex:1}.account-choice b{display:block}.account-choice small{display:block;color:#aaaabe;margin-top:4px}
 .account-choice .danger{padding:8px 11px}
+.account-open{border:1px solid #6651bc;background:#2c2946;color:#d9d1ff}.account-error-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:28px}.account-error-heading .account-section-title{margin:0}
