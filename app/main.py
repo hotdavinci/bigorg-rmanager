@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, date, time, timedelta
 import random
 from pathlib import Path
+import httpx
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, Body
 from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -170,6 +171,59 @@ def as_local_datetime(value: str|None) -> datetime|None:
     try: return datetime.fromisoformat(value.replace("Z","+00:00")).replace(tzinfo=None)
     except ValueError: return None
 
+async def cache_reel_thumbnail(reel: InstagramReel, source_url: str) -> None:
+    """Keep a small local visual record even when Instagram later removes a Reel.
+
+    The downloaded image replaces the fragile Instagram iframe/CDN URL. Failures
+    deliberately retain the last good image rather than making an old Reel blank.
+    """
+    if not source_url:
+        return
+    safe_id=re.sub(r"[^a-zA-Z0-9_-]", "_", reel.meta_media_id)
+    relative=Path("insights") / "thumbnails" / f"reel-{reel.account_id}-{safe_id}.jpg"
+    target=data_path(relative)
+    if target.is_file() and reel.cached_thumbnail_path:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=25, follow_redirects=True) as client:
+            response=await client.get(source_url)
+        content_type=response.headers.get("content-type", "").lower()
+        if response.status_code != 200 or not content_type.startswith("image/") or not response.content or len(response.content)>10*1024*1024:
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary=target.with_suffix(".tmp")
+        temporary.write_bytes(response.content)
+        temporary.replace(target)
+        reel.cached_thumbnail_path=str(relative).replace("\\", "/")
+    except (httpx.HTTPError, OSError):
+        # Insight sync must never fail just because the optional visual cache did.
+        return
+
+def archive_published_reel_video(session: Session, account_id: int, meta_media_id: str, source: Path) -> None:
+    """Preserve the exact processed file sent to Meta for a future winner card.
+
+    Meta does not reliably expose a downloadable media_url after a Reel is
+    published. Keeping this copy at publication time is what makes the ranking
+    survive a later deletion/takedown of the Reel itself.
+    """
+    if not source.is_file():
+        return
+    reel=session.scalar(select(InstagramReel).where(InstagramReel.account_id==account_id,InstagramReel.meta_media_id==str(meta_media_id)))
+    if not reel:
+        reel=InstagramReel(account_id=account_id,meta_media_id=str(meta_media_id))
+        session.add(reel); session.flush()
+    if reel.cached_video_path and data_path(reel.cached_video_path).is_file():
+        return
+    safe_id=re.sub(r"[^a-zA-Z0-9_-]", "_", str(meta_media_id))
+    relative=Path("insights") / "videos" / f"reel-{account_id}-{safe_id}{source.suffix.lower()}"
+    target=data_path(relative)
+    try:
+        target.parent.mkdir(parents=True,exist_ok=True)
+        shutil.copy2(source,target)
+        reel.cached_video_path=str(relative).replace("\\", "/")
+    except OSError:
+        return
+
 async def sync_reel_insights(session: Session) -> dict:
     synced=unsupported=0
     # Insights are independent from publishing health. An account may publish
@@ -182,6 +236,7 @@ async def sync_reel_insights(session: Session) -> dict:
                 if not reel:
                     reel=InstagramReel(account_id=account.id,meta_media_id=str(item["id"])); session.add(reel); session.flush()
                 reel.caption=str(item.get("caption") or ""); reel.permalink=str(item.get("permalink") or ""); reel.thumbnail_url=str(item.get("thumbnail_url") or ""); reel.video_url=str(item.get("media_url") or ""); reel.published_at=as_local_datetime(item.get("timestamp")); reel.views=int(item.get("views") or 0); reel.likes=int(item.get("like_count") or 0); reel.comments=int(item.get("comments_count") or 0); reel.synced_at=datetime.utcnow()
+                await cache_reel_thumbnail(reel,reel.thumbnail_url)
                 session.add(InstagramReelSnapshot(reel_id=reel.id,views=reel.views,likes=reel.likes,comments=reel.comments))
                 synced+=1
             account.last_insights_error=""
@@ -276,6 +331,7 @@ async def publish_claimed_post(post_id: int, account_ids_in_flight: set[int], se
                 post.status=PostStatus.WAITING_META; s.commit()
                 media_id=await meta.publish_reel(account.meta_account_id,meta.decrypt(account.encrypted_token),public_url,post.caption,cover_url)
                 post.status=PostStatus.PUBLISHED; post.last_error=""; attempt.status="PUBLISHED"; attempt.meta_media_id=media_id; attempt.finished_at=datetime.utcnow()
+                archive_published_reel_video(s,account.id,media_id,media_path)
                 other_uses=s.scalar(select(func.count()).select_from(ScheduledPost).where(ScheduledPost.processed_media_id==media.id,ScheduledPost.id!=post.id,ScheduledPost.status.not_in([PostStatus.PUBLISHED,PostStatus.CANCELLED,PostStatus.SKIPPED]))) or 0
                 if not other_uses:
                     media_path.unlink(missing_ok=True); media.status="Publicado (arquivo descartado)"
@@ -347,6 +403,8 @@ async def life(app):
         if "comments" not in snapshot_columns: connection.exec_driver_sql("ALTER TABLE instagram_reel_snapshots ADD COLUMN comments INTEGER NOT NULL DEFAULT 0")
         reel_columns={row[1] for row in connection.exec_driver_sql("PRAGMA table_info(instagram_reels)")}
         if "video_url" not in reel_columns: connection.exec_driver_sql("ALTER TABLE instagram_reels ADD COLUMN video_url VARCHAR(1500) NOT NULL DEFAULT ''")
+        if "cached_thumbnail_path" not in reel_columns: connection.exec_driver_sql("ALTER TABLE instagram_reels ADD COLUMN cached_thumbnail_path VARCHAR(500) NOT NULL DEFAULT ''")
+        if "cached_video_path" not in reel_columns: connection.exec_driver_sql("ALTER TABLE instagram_reels ADD COLUMN cached_video_path VARCHAR(500) NOT NULL DEFAULT ''")
         cover_columns={row[1] for row in connection.exec_driver_sql("PRAGMA table_info(processed_covers)")}
         if cover_columns and "post_id" not in cover_columns:
             # SQLite cannot remove the old unique constraint in place. Keep the
@@ -637,10 +695,54 @@ def activity_summary(s:Session=Depends(db)):
         "pending": s.query(ScheduledPost).filter_by(status=PostStatus.PENDING).count(),
         "failed": s.query(ScheduledPost).filter_by(status=PostStatus.FAILED).count(),
     }
+def saved_insight_winner_settings(session: Session) -> dict:
+    def integer(key: str, default: int, minimum: int, maximum: int) -> int:
+        item=session.get(ApplicationSetting,key)
+        try: return min(maximum,max(minimum,int(item.value if item else default)))
+        except (TypeError,ValueError): return default
+    return {"limit":integer("insights_winners_limit",20,1,100),"minimum_views":integer("insights_winners_minimum_views",0,0,2_000_000_000)}
+
+class InsightWinnerSettingsIn(BaseModel):
+    limit: int=20
+    minimum_views: int=0
+
+@app.get("/api/insights/settings")
+def get_insight_winner_settings(s:Session=Depends(db)):
+    return saved_insight_winner_settings(s)
+
+@app.put("/api/insights/settings")
+def update_insight_winner_settings(payload:InsightWinnerSettingsIn,s:Session=Depends(db)):
+    values={"insights_winners_limit":str(min(100,max(1,payload.limit))),"insights_winners_minimum_views":str(min(2_000_000_000,max(0,payload.minimum_views)))}
+    for key,value in values.items():
+        item=s.get(ApplicationSetting,key)
+        if item: item.value=value
+        else: s.add(ApplicationSetting(key=key,value=value))
+    commit_with_retry(s)
+    return saved_insight_winner_settings(s)
+
+@app.get("/api/insights/reels/{reel_id}/thumbnail")
+def cached_insight_thumbnail(reel_id:int,s:Session=Depends(db)):
+    reel=s.get(InstagramReel,reel_id)
+    if not reel or not reel.cached_thumbnail_path: raise HTTPException(404,"Miniatura salva não encontrada")
+    target=data_path(reel.cached_thumbnail_path)
+    if not target.is_file(): raise HTTPException(404,"Arquivo de miniatura não encontrado")
+    return FileResponse(target,media_type="image/jpeg",headers={"Cache-Control":"private, max-age=86400"})
+
+@app.get("/api/insights/reels/{reel_id}/video")
+def cached_insight_video(reel_id:int,s:Session=Depends(db)):
+    reel=s.get(InstagramReel,reel_id)
+    if not reel or not reel.cached_video_path: raise HTTPException(404,"Vídeo salvo não encontrado")
+    target=data_path(reel.cached_video_path)
+    if not target.is_file(): raise HTTPException(404,"Arquivo de vídeo não encontrado")
+    media_type="video/quicktime" if target.suffix.lower()==".mov" else "video/mp4"
+    return FileResponse(target,media_type=media_type,headers={"Cache-Control":"private, max-age=86400"})
+
 @app.get("/api/insights/reels")
-def insight_reels(period:str="total",limit:int=100,s:Session=Depends(db)):
+def insight_reels(period:str="total",s:Session=Depends(db)):
     windows={"24h":timedelta(hours=24),"7d":timedelta(days=7),"30d":timedelta(days=30)}
+    period=period if period in {"total",*windows} else "total"
     cutoff=datetime.utcnow()-windows[period] if period in windows else None
+    winner_settings=saved_insight_winner_settings(s)
     rows=[]
     published_attempts={str(attempt.meta_media_id):attempt for attempt in s.scalars(select(PublicationAttempt).where(PublicationAttempt.status=="PUBLISHED",PublicationAttempt.meta_media_id!=""))}
     for reel in s.scalars(select(InstagramReel)).all():
@@ -648,7 +750,17 @@ def insight_reels(period:str="total",limit:int=100,s:Session=Depends(db)):
         baseline=None
         if cutoff:
             baseline=s.execute(select(InstagramReelSnapshot.views,InstagramReelSnapshot.likes,InstagramReelSnapshot.comments).where(InstagramReelSnapshot.reel_id==reel.id,InstagramReelSnapshot.captured_at<=cutoff).order_by(InstagramReelSnapshot.captured_at.desc())).first()
-        base_views,base_likes,base_comments=baseline if baseline else (reel.views,reel.likes,reel.comments)
+        # If a Reel was published inside the chosen window, all of its current
+        # numbers belong to that window even before the first snapshot exists.
+        # For older Reels without a historical reading, do not invent zero growth.
+        published_inside_window=bool(cutoff and reel.published_at and reel.published_at>=cutoff)
+        baseline_available=bool(baseline or published_inside_window or not cutoff)
+        if baseline:
+            base_views,base_likes,base_comments=baseline
+        elif published_inside_window:
+            base_views,base_likes,base_comments=0,0,0
+        else:
+            base_views,base_likes,base_comments=reel.views,reel.likes,reel.comments
         library_media=None
         # Reels publicados por este sistema trazem o ID da Meta na tentativa de
         # publicação. Daí percorremos post -> processado -> original, sem usar
@@ -660,10 +772,17 @@ def insight_reels(period:str="total",limit:int=100,s:Session=Depends(db)):
             original=s.get(Media,processed.original_media_id) if processed and processed.original_media_id else None
             if original and original.kind=="original":
                 library_media={"id":original.id,"name":original.original_name,"thumbnail_url":f"/api/media/{original.id}/thumbnail","video_url":f"/api/media/{original.id}/stream"}
-        rows.append({"id":reel.id,"meta_media_id":reel.meta_media_id,"conta":account.username if account else "conta removida","caption":reel.caption,"permalink":reel.permalink,"thumbnail_url":reel.thumbnail_url,"video_url":reel.video_url,"library_media":library_media,"published_at":reel.published_at,"views":reel.views,"likes":reel.likes,"comments":reel.comments,"growth":max(0,reel.views-base_views) if cutoff else reel.views,"likes_value":max(0,reel.likes-base_likes) if cutoff else reel.likes,"comments_value":max(0,reel.comments-base_comments) if cutoff else reel.comments,"has_baseline":baseline is not None})
-    rows.sort(key=lambda item:(item["growth"],item["views"]),reverse=True)
-    selected=rows[:min(max(limit,1),500)]
-    return {"period":period,"reels":selected,"summary":{"views":sum(item["growth"] for item in rows),"likes":sum(item["likes_value"] for item in rows),"comments":sum(item["comments_value"] for item in rows),"reels":len(rows)},"accounts":[{"id":account.id,"username":account.username,"error":account.last_insights_error,"synced_at":max([reel.synced_at for reel in s.scalars(select(InstagramReel).where(InstagramReel.account_id==account.id))],default=None)} for account in s.scalars(select(InstagramAccount))]}
+        growth=max(0,reel.views-base_views) if cutoff and baseline_available else reel.views
+        likes_value=max(0,reel.likes-base_likes) if cutoff and baseline_available else reel.likes
+        comments_value=max(0,reel.comments-base_comments) if cutoff and baseline_available else reel.comments
+        rows.append({"id":reel.id,"meta_media_id":reel.meta_media_id,"conta":account.username if account else "conta removida","caption":reel.caption,"permalink":reel.permalink,"thumbnail_url":reel.thumbnail_url,"cached_thumbnail_url":f"/api/insights/reels/{reel.id}/thumbnail" if reel.cached_thumbnail_path else "","cached_video_url":f"/api/insights/reels/{reel.id}/video" if reel.cached_video_path and data_path(reel.cached_video_path).is_file() else "","library_media":library_media,"published_at":reel.published_at,"views":reel.views,"likes":reel.likes,"comments":reel.comments,"growth":growth,"likes_value":likes_value,"comments_value":comments_value,"has_baseline":baseline_available})
+    measured=[item for item in rows if item["has_baseline"]]
+    # Totals always cover every measurable Reel, independently of the card limit
+    # or the minimum used only to decide the winners list.
+    summary={"views":sum(item["growth"] for item in measured),"likes":sum(item["likes_value"] for item in measured),"comments":sum(item["comments_value"] for item in measured),"reels":len(rows),"measured_reels":len(measured),"awaiting_history":len(rows)-len(measured)}
+    ranked=[item for item in measured if item["growth"]>=winner_settings["minimum_views"]]
+    ranked.sort(key=lambda item:(item["growth"],item["views"]),reverse=True)
+    return {"period":period,"reels":ranked[:winner_settings["limit"]],"summary":summary,"settings":winner_settings,"accounts":[{"id":account.id,"username":account.username,"error":account.last_insights_error,"synced_at":max([reel.synced_at for reel in s.scalars(select(InstagramReel).where(InstagramReel.account_id==account.id))],default=None)} for account in s.scalars(select(InstagramAccount))]}
 @app.post("/api/insights/sync")
 def request_insight_sync():
     threading.Thread(target=lambda: asyncio.run(run_insights_sync_if_due(True)),daemon=True,name="instagram-insights-sync").start()
