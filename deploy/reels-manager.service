@@ -1,0 +1,19 @@
+[Unit]
+Description=Reels Automation Manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=reels
+Group=reels
+WorkingDirectory=/opt/reels-manager
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/reels-manager/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

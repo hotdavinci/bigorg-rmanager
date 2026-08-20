@@ -1,0 +1,5 @@
+.library-toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.media{position:relative;cursor:pointer}
+.media.selected-media{border-color:#9c79ff;background:#211d38}
+.media-check{position:absolute;z-index:2;top:17px;left:17px;width:24px;height:24px;display:grid;place-items:center;border-radius:7px;background:#11121dcc;border:1px solid #77708e}
+.media-check input{accent-color:#9b6bff;width:16px;height:16px;cursor:pointer}

@@ -1,0 +1,14 @@
+[Unit]
+Description=Cloudflare Tunnel - Reels Automation Manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/reels-manager/tools/cloudflared --config /etc/cloudflared/reels-manager.yml tunnel run
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
