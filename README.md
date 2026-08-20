@@ -1,5 +1,7 @@
 # Reels Automation Manager
 
+> Painel de automação e acompanhamento de Reels.
+
 Painel local para organizar, processar e agendar Reels de contas profissionais, usando apenas a API oficial da Meta.
 
 ## Iniciar no Windows
