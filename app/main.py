@@ -33,6 +33,10 @@ def account_is_eligible(account: InstagramAccount, now: datetime|None=None) -> b
     now=now or datetime.utcnow()
     return bool(account.active and account.encrypted_token and account.last_verified_at and not (account.last_error or "").strip() and (not account.token_expires_at or account.token_expires_at>now))
 
+def is_definitive_account_error(error: Exception) -> bool:
+    message=str(error).lower()
+    return any(token in message for token in ("invalid token","error validating access token","oauth","permission","not authorized","unsupported post request","checkpoint","code 190","code=190"))
+
 def audit(session: Session, event_type: str, message: str, campaign_id: int|None=None, account_id: int|None=None):
     session.add(AuditLog(event_type=event_type,message=message,campaign_id=campaign_id,account_id=account_id))
 
@@ -66,8 +70,11 @@ def parse_intervals(values: list[str]):
     ranges=[]
     for item in values:
         left,right=item.split("-"); start=datetime.strptime(left.strip(),"%H:%M").time(); end=datetime.strptime(right.strip(),"%H:%M").time()
-        if start>=end: raise ValueError(f"Intervalo inválido: {item}")
-        ranges.append((start,end))
+        low=start.hour*60+start.minute; high=end.hour*60+end.minute
+        if low==high: raise ValueError(f"Intervalo inválido: {item}. O início e o fim não podem ser iguais")
+        # 23:00-00:00 and 23:30-01:00 are valid ranges crossing midnight.
+        if high<low: high+=24*60
+        ranges.append((low,high))
     return ranges
 
 def _clone_processed_for_schedule(session: Session, campaign_id: int, original_media_id: int, seed_media: Media, account_id: int, position: int) -> Media:
@@ -102,13 +109,12 @@ def materialize_missing_schedule_for_account(session: Session, campaign: Campaig
     created=0
     for day_offset in range(rule.days):
         current=start_date+timedelta(days=day_offset)
-        for range_index,(start,end) in enumerate(ranges):
+        for range_index,(low,high) in enumerate(ranges):
             position=day_offset*1000+range_index
             if position in existing_positions: continue
-            low=start.hour*60+start.minute; high=end.hour*60+end.minute
             # Stable randomness means a restart calculates the same occurrence.
             rng=random.Random(f"campaign:{campaign.id}:account:{account.id}:slot:{position}")
-            minute=rng.randint(low,high); when=datetime.combine(current,time(minute//60,minute%60))
+            minute=rng.randint(low,high); when=datetime.combine(current,time())+timedelta(minutes=minute)
             if when<=now: continue
             source_id=rng.choice(sources) if rule.strategy=="random" else sources[position%len(sources)]
             seeds=list(session.scalars(select(Media).where(Media.kind=="processed",Media.original_media_id==source_id)))
@@ -316,6 +322,55 @@ async def insights_scheduler():
         await run_insights_sync_if_due()
         await asyncio.sleep(300)
 
+async def run_account_health_check(force: bool=False) -> dict|None:
+    """Verify publish tokens without keeping SQLite write locks during HTTP calls."""
+    now=datetime.utcnow(); lock_name="instagram-account-health"
+    with DbSession() as session:
+        lock=session.get(SchedulerLock,lock_name)
+        interval=timedelta(minutes=max(5,settings.account_health_check_minutes))
+        if lock and lock.locked_until and lock.locked_until>now: return None
+        if not force and lock and lock.last_run_at and lock.last_run_at>now-interval: return None
+        if not lock: lock=SchedulerLock(name=lock_name); session.add(lock)
+        lock.locked_until=now+timedelta(minutes=10); session.commit()
+        account_ids=list(session.scalars(select(InstagramAccount.id).where(InstagramAccount.active==True)))
+    checked=healthy=removed=transient=0
+    try:
+        for account_id in account_ids:
+            with DbSession() as session:
+                account=session.get(InstagramAccount,account_id)
+                if not account or not account.active: continue
+                checked+=1
+                try:
+                    profile=await meta.profile(meta.decrypt(account.encrypted_token))
+                    # A different profile is not a healthy reconnection either.
+                    if str(profile.get("account_id") or "")!=str(account.meta_account_id):
+                        raise RuntimeError("A validação retornou uma conta diferente da vinculada")
+                    account.username=profile.get("username") or account.username
+                    account.display_name=profile.get("name") or account.display_name
+                    account.profile_picture_url=profile.get("profile_picture_url") or account.profile_picture_url
+                    account.last_verified_at=datetime.utcnow(); account.last_error=""; healthy+=1
+                    commit_with_retry(session)
+                except Exception as exc:
+                    if is_definitive_account_error(exc):
+                        reason=f"Falha na verificação automática: {str(exc)[:700]}"
+                        cancel_account_from_active_campaigns(session,account,reason)
+                        commit_with_retry(session); removed+=1
+                    else:
+                        # Network/API instabilities do not wrongly deactivate a
+                        # good account. The next scheduled check tries again.
+                        audit(session,"ACCOUNT_HEALTH_RETRY",f"Verificação adiada por falha temporária: {str(exc)[:500]}",account_id=account.id)
+                        commit_with_retry(session); transient+=1
+        return {"checked":checked,"healthy":healthy,"removed":removed,"transient":transient}
+    finally:
+        with DbSession() as session:
+            lock=session.get(SchedulerLock,lock_name)
+            if lock: lock.last_run_at=datetime.utcnow(); lock.locked_until=datetime.utcnow(); session.commit()
+
+async def account_health_scheduler():
+    while True:
+        await run_account_health_check()
+        await asyncio.sleep(300)
+
 def is_definitive_publish_error(error: Exception) -> bool:
     message=str(error).lower()
     return any(token in message for token in ("invalid token","expired","permission","oauth","401","403","unsupported post request","not authorized","checkpoint"))
@@ -476,10 +531,11 @@ async def life(app):
     await tunnel.start()
     task=asyncio.create_task(scheduler())
     insights_task=asyncio.create_task(insights_scheduler())
+    account_health_task=asyncio.create_task(account_health_scheduler())
     try:
         yield
     finally:
-        task.cancel(); insights_task.cancel(); media_server.should_exit=True; media_task.cancel(); await tunnel.stop()
+        task.cancel(); insights_task.cancel(); account_health_task.cancel(); media_server.should_exit=True; media_task.cancel(); await tunnel.stop()
 app=FastAPI(title="Reels Automation Manager", lifespan=life)
 app.add_middleware(
     CORSMiddleware,
@@ -615,6 +671,11 @@ def restart_app():
 def accounts(s:Session=Depends(db)):
     now=datetime.utcnow()
     return [{"id":a.id,"username":a.username,"nome":a.display_name,"ativo":a.active,"conectada_em":a.connected_at,"expira_em":a.token_expires_at,"verificada_em":a.last_verified_at,"erro":a.last_error,"sincronizacao_devida_em":a.campaign_sync_due_at,"sincronizada_em":a.campaign_sync_completed_at,"apta":account_is_eligible(a,now),"status":"APTA" if account_is_eligible(a,now) else ("TOKEN_EXPIRADO" if a.token_expires_at and a.token_expires_at<=now else "COM_ERRO" if a.last_error else "DESCONECTADA")} for a in s.scalars(select(InstagramAccount).order_by(InstagramAccount.connected_at.desc()))]
+
+@app.post("/api/meta/accounts/refresh-health")
+async def refresh_accounts_health():
+    result=await run_account_health_check(force=True)
+    return result or {"checked":0,"healthy":0,"removed":0,"transient":0}
 
 @app.get("/api/account-campaign-sync-settings")
 def account_campaign_sync_settings(s:Session=Depends(db)):
@@ -1081,8 +1142,10 @@ def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(
         for left,right in matches:
             try:
                 a=datetime.strptime(left,"%H:%M").time(); b=datetime.strptime(right,"%H:%M").time()
-                if a>=b: raise ValueError()
-                ranges.append((a,b))
+                low=a.hour*60+a.minute; high=b.hour*60+b.minute
+                if low==high: raise ValueError()
+                if high<low: high+=24*60
+                ranges.append((low,high))
             except ValueError: raise HTTPException(422,f"Intervalo inválido: {left}-{right}. Use HH:MM-HH:MM")
     post_ids=select(ScheduledPost.id).where(ScheduledPost.campaign_id==campaign_id)
     s.execute(delete(ScheduledPostCover).where(ScheduledPostCover.post_id.in_(post_ids)))
@@ -1096,8 +1159,7 @@ def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(
     for day_offset in range(body.days):
         current=body.start_date+timedelta(days=day_offset)
         if current<date.today(): continue
-        for start,end in ranges:
-            low=start.hour*60+start.minute; high=end.hour*60+end.minute
+        for low,high in ranges:
             for account_id in accounts:
                 if current==date.today():
                     earliest=datetime.now()+timedelta(minutes=5)
@@ -1140,7 +1202,7 @@ def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(
                     data_path(media.relative_path).unlink(missing_ok=True); s.delete(media)
                     if cover_data: data_path(cover_data[0]).unlink(missing_ok=True)
                     continue
-                minute=random.randint(effective_low,job["high"]); when=datetime.combine(job["current"],time(minute//60,minute%60))
+                minute=random.randint(effective_low,job["high"]); when=datetime.combine(job["current"],time())+timedelta(minutes=minute)
                 post=ScheduledPost(campaign_id=campaign_id,account_id=job["account_id"],processed_media_id=media.id,caption=job["caption"],scheduled_for=when,position=position)
                 s.add(post); s.flush()
                 if cover_data:

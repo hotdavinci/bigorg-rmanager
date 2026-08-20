@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     scheduler_claim_timeout_seconds: int = 900
     insights_sync_hours: int = 6
     insights_reels_limit: int = 100
+    account_health_check_minutes: int = 15
     admin_email: str = "hotdavinci@gmail.com"
     admin_password: str = ""
     campaign_cover_path: str = ""
@@ -57,5 +58,5 @@ def data_path(relative_path: str | Path) -> Path:
 def reload_runtime_settings() -> None:
     """Rele o .env sem interromper o servidor local."""
     updated = Settings()
-    for field in ("app_encryption_key", "meta_app_id", "meta_instagram_app_id", "meta_instagram_app_secret", "meta_app_secret", "meta_redirect_uri", "meta_graph_api_version", "meta_oauth_authorize_url", "meta_oauth_token_url", "meta_graph_base_url", "python_executable", "processing_timeout_seconds", "processing_batch_size", "scheduler_poll_seconds", "scheduler_parallelism", "scheduler_max_attempts", "scheduler_claim_timeout_seconds", "insights_sync_hours", "insights_reels_limit", "admin_email", "admin_password", "campaign_cover_path", "cloudflared_path", "tunnel_media_port", "public_media_base_url", "cors_allowed_origins", "session_https_only"):
+    for field in ("app_encryption_key", "meta_app_id", "meta_instagram_app_id", "meta_instagram_app_secret", "meta_app_secret", "meta_redirect_uri", "meta_graph_api_version", "meta_oauth_authorize_url", "meta_oauth_token_url", "meta_graph_base_url", "python_executable", "processing_timeout_seconds", "processing_batch_size", "scheduler_poll_seconds", "scheduler_parallelism", "scheduler_max_attempts", "scheduler_claim_timeout_seconds", "insights_sync_hours", "insights_reels_limit", "account_health_check_minutes", "admin_email", "admin_password", "campaign_cover_path", "cloudflared_path", "tunnel_media_port", "public_media_base_url", "cors_allowed_origins", "session_https_only"):
         setattr(settings, field, getattr(updated, field))

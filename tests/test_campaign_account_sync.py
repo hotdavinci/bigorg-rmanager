@@ -73,6 +73,12 @@ class CampaignAccountSyncTests(unittest.TestCase):
         self.assertEqual(main.retry_delay(3),120)
         self.assertEqual(main.retry_delay(20),120)
 
+    def test_interval_crossing_midnight_is_valid(self):
+        self.assertEqual(main.parse_intervals(["23:00-00:00", "23:30-01:15"]),[(1380,1440),(1410,1515)])
+
+    def test_interval_with_same_start_and_end_is_rejected(self):
+        with self.assertRaises(ValueError): main.parse_intervals(["00:00-00:00"])
+
 
 if __name__ == "__main__":
     unittest.main()

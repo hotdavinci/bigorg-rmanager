@@ -93,6 +93,12 @@ function App() {
     (async()=>{ setInsightsUpdating(true); try { await api('/insights/sync',{method:'POST'}); await watch(); } catch { if(!cancelled)setInsightsUpdating(false); } })();
     return ()=>{cancelled=true;if(timer)window.clearTimeout(timer);};
   },[page]);
+  useEffect(() => {
+    if(page!=='Contas') return;
+    // A lista nunca depende só do estado antigo salvo no navegador: ela pede
+    // uma validação real à Meta sempre que esta tela é aberta.
+    api('/meta/accounts/refresh-health',{method:'POST'}).then(()=>api('/meta/accounts')).then(setAccounts).catch(()=>{});
+  },[page]);
   useEffect(() => { if(campaignOpen) setCampaignName(defaultCampaignName(scheduleStart,Number(scheduleDays)||1,scheduleRanges)); }, [campaignOpen,scheduleStart,scheduleDays,scheduleRanges]);
   const importMedia = async (event: React.ChangeEvent<HTMLInputElement>) => {
     if (!event.target.files?.length) return;

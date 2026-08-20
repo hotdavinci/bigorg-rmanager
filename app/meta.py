@@ -76,7 +76,10 @@ async def exchange_code(code: str) -> tuple[str, datetime|None]:
 async def profile(token: str) -> dict:
     async with httpx.AsyncClient(timeout=30) as client:
         response=await client.get(f"{settings.meta_graph_base_url}/me", params={"fields":"id,user_id,username,name,profile_picture_url", "access_token":token})
-        if response.is_error: raise HTTPException(400, "Token recebido, mas não foi possível identificar a conta profissional")
+        if response.is_error:
+            # The caller needs Meta's reason (especially OAuth 190) to decide
+            # whether a token is definitively invalid or a network retry.
+            raise HTTPException(400, f"Não foi possível validar a conta: {response.text[:700]}")
         data=response.json(); data["account_id"]=str(data.get("user_id") or data.get("id") or "")
         if not data["account_id"]: raise HTTPException(400, "A Meta não retornou o ID da conta")
         return data
