@@ -32,7 +32,7 @@ def db():
 def account_is_eligible(account: InstagramAccount, now: datetime|None=None) -> bool:
     """One conservative definition used by the UI, setup and scheduler."""
     now=now or datetime.utcnow()
-    return bool(account.active and account.encrypted_token and account.last_verified_at and not (account.last_error or "").strip() and (not account.token_expires_at or account.token_expires_at>now))
+    return bool(not account.deleted_at and account.active and account.encrypted_token and account.last_verified_at and not (account.last_error or "").strip() and (not account.token_expires_at or account.token_expires_at>now))
 
 def is_definitive_account_error(error: Exception) -> bool:
     message=str(error).lower()
@@ -336,13 +336,13 @@ async def run_account_health_check(force: bool=False) -> dict|None:
         if not force and lock and lock.last_run_at and lock.last_run_at>now-interval: return None
         if not lock: lock=SchedulerLock(name=lock_name); session.add(lock)
         lock.locked_until=now+timedelta(minutes=10); session.commit()
-        account_ids=list(session.scalars(select(InstagramAccount.id).where(InstagramAccount.active==True)))
+        account_ids=list(session.scalars(select(InstagramAccount.id).where(InstagramAccount.active==True,InstagramAccount.deleted_at.is_(None))))
     checked=healthy=removed=transient=0
     try:
         for account_id in account_ids:
             with DbSession() as session:
                 account=session.get(InstagramAccount,account_id)
-                if not account or not account.active: continue
+                if not account or not account.active or account.deleted_at: continue
                 checked+=1
                 try:
                     profile=await meta.profile(meta.decrypt(account.encrypted_token))
@@ -501,6 +501,7 @@ async def life(app):
         if "last_insights_error" not in account_columns: connection.exec_driver_sql("ALTER TABLE instagram_accounts ADD COLUMN last_insights_error TEXT NOT NULL DEFAULT ''")
         if "campaign_sync_due_at" not in account_columns: connection.exec_driver_sql("ALTER TABLE instagram_accounts ADD COLUMN campaign_sync_due_at DATETIME")
         if "campaign_sync_completed_at" not in account_columns: connection.exec_driver_sql("ALTER TABLE instagram_accounts ADD COLUMN campaign_sync_completed_at DATETIME")
+        if "deleted_at" not in account_columns: connection.exec_driver_sql("ALTER TABLE instagram_accounts ADD COLUMN deleted_at DATETIME")
         post_columns={row[1] for row in connection.exec_driver_sql("PRAGMA table_info(scheduled_posts)")}
         if "next_attempt_at" not in post_columns: connection.exec_driver_sql("ALTER TABLE scheduled_posts ADD COLUMN next_attempt_at DATETIME")
         if "last_error" not in post_columns: connection.exec_driver_sql("ALTER TABLE scheduled_posts ADD COLUMN last_error TEXT NOT NULL DEFAULT ''")
@@ -674,7 +675,7 @@ def restart_app():
 @app.get("/api/meta/accounts")
 def accounts(s:Session=Depends(db)):
     now=datetime.utcnow()
-    return [{"id":a.id,"username":a.username,"nome":a.display_name,"ativo":a.active,"conectada_em":a.connected_at,"expira_em":a.token_expires_at,"verificada_em":a.last_verified_at,"erro":a.last_error,"sincronizacao_devida_em":a.campaign_sync_due_at,"sincronizada_em":a.campaign_sync_completed_at,"apta":account_is_eligible(a,now),"status":"APTA" if account_is_eligible(a,now) else ("TOKEN_EXPIRADO" if a.token_expires_at and a.token_expires_at<=now else "COM_ERRO" if a.last_error else "DESCONECTADA")} for a in s.scalars(select(InstagramAccount).order_by(InstagramAccount.connected_at.desc()))]
+    return [{"id":a.id,"username":a.username,"nome":a.display_name,"ativo":a.active,"conectada_em":a.connected_at,"expira_em":a.token_expires_at,"verificada_em":a.last_verified_at,"erro":a.last_error,"sincronizacao_devida_em":a.campaign_sync_due_at,"sincronizada_em":a.campaign_sync_completed_at,"apta":account_is_eligible(a,now),"status":"APTA" if account_is_eligible(a,now) else ("TOKEN_EXPIRADO" if a.token_expires_at and a.token_expires_at<=now else "COM_ERRO" if a.last_error else "DESCONECTADA")} for a in s.scalars(select(InstagramAccount).where(InstagramAccount.deleted_at.is_(None)).order_by(InstagramAccount.connected_at.desc()))]
 
 @app.post("/api/meta/accounts/refresh-health")
 async def refresh_accounts_health():
@@ -715,22 +716,16 @@ async def oauth_callback(code:str|None=None,state:str|None=None,error:str|None=N
         if not account:
             account=InstagramAccount(meta_account_id=profile["account_id"],encrypted_token=meta.encrypt(token)); s.add(account)
         else: account.encrypted_token=meta.encrypt(token)
-        account.username=profile.get("username",""); account.display_name=profile.get("name",account.username); account.profile_picture_url=profile.get("profile_picture_url",""); account.token_expires_at=expires; account.active=True; account.connected_at=datetime.utcnow(); account.last_verified_at=datetime.utcnow(); account.last_error=""
+        account.username=profile.get("username",""); account.display_name=profile.get("name",account.username); account.profile_picture_url=profile.get("profile_picture_url",""); account.token_expires_at=expires; account.active=True; account.deleted_at=None; account.connected_at=datetime.utcnow(); account.last_verified_at=datetime.utcnow(); account.last_error=""
         days=schedule_account_campaign_sync(s,account)
         audit(s,"ACCOUNT_RECONNECTED",f"Conta reconectada e validada via OAuth; será sincronizada em {days} dia(s).",account_id=account.id)
         commit_with_retry(s)
         return HTMLResponse("<script>window.opener&&window.opener.location.reload();window.close()</script><h2>Conta conectada com sucesso.</h2><p>Você já pode fechar esta janela e voltar ao Reels Manager.</p>")
     except HTTPException as e: return HTMLResponse(f"<h2>Não foi possível conectar a conta.</h2><p>{e.detail}</p>",e.status_code)
-def delete_account_safely(s: Session, item: InstagramAccount) -> list[str]:
-    """Remove dependencies that SQLite does not cascade, preserving post history."""
+def delete_account_safely(s: Session, item: InstagramAccount) -> None:
+    """Remove the account from operation but retain published Reel history and insights."""
     account_id=item.id
     campaign_ids=list(s.scalars(select(CampaignAccount.campaign_id).where(CampaignAccount.account_id==account_id)))
-    reels=list(s.scalars(select(InstagramReel).where(InstagramReel.account_id==account_id)))
-    reel_ids=[reel.id for reel in reels]
-    cached_paths=[path for reel in reels for path in (reel.cached_thumbnail_path,reel.cached_video_path) if path]
-    if reel_ids:
-        s.execute(delete(InstagramReelSnapshot).where(InstagramReelSnapshot.reel_id.in_(reel_ids)))
-    s.execute(delete(InstagramReel).where(InstagramReel.account_id==account_id))
     s.query(ScheduledPost).filter(ScheduledPost.account_id==account_id,ScheduledPost.status.in_([PostStatus.PENDING,PostStatus.CLAIMED,PostStatus.UPLOADING,PostStatus.WAITING_META,PostStatus.PUBLISHING,PostStatus.PAUSED])).update({ScheduledPost.status:PostStatus.CANCELLED},synchronize_session=False)
     s.execute(delete(CampaignAccount).where(CampaignAccount.account_id==account_id))
     s.execute(delete(CampaignAccountExclusion).where(CampaignAccountExclusion.account_id==account_id))
@@ -738,9 +733,13 @@ def delete_account_safely(s: Session, item: InstagramAccount) -> list[str]:
         if not s.scalar(select(func.count()).select_from(CampaignAccount).where(CampaignAccount.campaign_id==campaign_id)):
             campaign=s.get(Campaign,campaign_id)
             if campaign and campaign.status==CampaignStatus.ACTIVE: campaign.status=CampaignStatus.PAUSED
-    audit(s,"ACCOUNT_REMOVED","Conta removida manualmente; vínculos e agendamentos futuros foram cancelados.",account_id=account_id)
-    s.delete(item)
-    return cached_paths
+    item.active=False
+    item.encrypted_token=""
+    item.token_expires_at=None
+    item.campaign_sync_due_at=None
+    item.campaign_sync_completed_at=datetime.utcnow()
+    item.deleted_at=datetime.utcnow()
+    audit(s,"ACCOUNT_REMOVED","Conta removida manualmente; vínculos e agendamentos futuros foram cancelados. Histórico de Reels e insights preservado.",account_id=account_id)
 
 def remove_cached_insight_files(paths: list[str]) -> None:
     for relative_path in set(paths):
@@ -754,19 +753,19 @@ def remove_cached_insight_files(paths: list[str]) -> None:
 def remove_accounts_bulk(account_ids:list[int]=Body(...),s:Session=Depends(db)):
     ids=list(dict.fromkeys(account_ids))
     if not ids: raise HTTPException(400,"Selecione ao menos uma conta")
-    removed=[]; missing=[]; cached_paths=[]
+    removed=[]; missing=[]
     for account_id in ids:
         item=s.get(InstagramAccount,account_id)
         if not item: missing.append(account_id); continue
-        cached_paths.extend(delete_account_safely(s,item)); removed.append(account_id)
-    commit_with_retry(s); remove_cached_insight_files(cached_paths)
+        delete_account_safely(s,item); removed.append(account_id)
+    commit_with_retry(s)
     return {"removed":removed,"missing":missing}
 @app.delete("/api/meta/accounts/{account_id}")
 def remove_account(account_id:int,s:Session=Depends(db)):
     item=s.get(InstagramAccount,account_id)
     if not item: raise HTTPException(404,"Conta não encontrada")
-    cached_paths=delete_account_safely(s,item)
-    commit_with_retry(s); remove_cached_insight_files(cached_paths)
+    delete_account_safely(s,item)
+    commit_with_retry(s)
     return {"ok":True}
 @app.get("/api/dashboard")
 def dashboard(period:str="total",s:Session=Depends(db)):
@@ -942,7 +941,7 @@ def insight_reels(period:str="total",s:Session=Depends(db)):
     summary={"views":sum(item["views"] for item in rows),"likes":sum(item["likes"] for item in rows),"comments":sum(item["comments"] for item in rows),"reels":len(rows),"measured_reels":len(rows),"awaiting_history":0}
     ranked=[item for item in rows if item["views"]>=winner_settings["minimum_views"]]
     ranked.sort(key=lambda item:(item["growth"],item["views"]),reverse=True)
-    return {"period":period,"reels":ranked[:winner_settings["limit"]],"summary":summary,"settings":winner_settings,"accounts":[{"id":account.id,"username":account.username,"error":account.last_insights_error,"synced_at":max([reel.synced_at for reel in s.scalars(select(InstagramReel).where(InstagramReel.account_id==account.id))],default=None)} for account in s.scalars(select(InstagramAccount))]}
+    return {"period":period,"reels":ranked[:winner_settings["limit"]],"summary":summary,"settings":winner_settings,"accounts":[{"id":account.id,"username":account.username,"error":account.last_insights_error,"synced_at":max([reel.synced_at for reel in s.scalars(select(InstagramReel).where(InstagramReel.account_id==account.id))],default=None)} for account in s.scalars(select(InstagramAccount).where(InstagramAccount.deleted_at.is_(None)))]}
 @app.post("/api/insights/sync")
 def request_insight_sync():
     threading.Thread(target=lambda: asyncio.run(run_insights_sync_if_due(True)),daemon=True,name="instagram-insights-sync").start()
