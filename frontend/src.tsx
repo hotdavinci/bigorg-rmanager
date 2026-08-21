@@ -1592,17 +1592,17 @@ function Metric({ icon: Icon, label, value }: any) {
   );
 }
 function ViewsChart({ points }: any) {
+  const [hovered, setHovered] = useState<number | null>(null);
   const data = (points || []) as any[];
   const width = 720,
     height = 130,
     padding = 12,
     max = Math.max(1, ...data.map((item) => Number(item.views) || 0));
-  const coordinates = data
-    .map(
-      (item, index) =>
-        `${padding + (data.length < 2 ? 0 : (index * (width - padding * 2)) / (data.length - 1))},${height - padding - ((Number(item.views) || 0) / max) * (height - padding * 2)}`,
-    )
-    .join(" ");
+  const pointPositions = data.map((item, index) => ({
+    x: padding + (data.length < 2 ? 0 : (index * (width - padding * 2)) / (data.length - 1)),
+    y: height - padding - ((Number(item.views) || 0) / max) * (height - padding * 2),
+  }));
+  const coordinates = pointPositions.map((point) => `${point.x},${point.y}`).join(" ");
   const dateOf = (value: string) =>
     new Date(value.includes("T") ? value : `${value}T12:00:00`);
   const format = (value: string) =>
@@ -1614,6 +1614,7 @@ function ViewsChart({ points }: any) {
     });
   const hoverLabel = (item: any) =>
     `${dateOf(item.date).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: item.date.includes("T") ? "short" : undefined })} · ${Number(item.views || 0).toLocaleString("pt-BR")} views`;
+  const hoveredPoint = hovered === null ? null : pointPositions[hovered];
   return (
     <div className="views-chart">
       {data.length ? (
@@ -1622,6 +1623,7 @@ function ViewsChart({ points }: any) {
             viewBox={`0 0 ${width} ${height}`}
             role="img"
             aria-label="Gráfico de views"
+            onMouseLeave={() => setHovered(null)}
           >
             <line
               x1={padding}
@@ -1631,13 +1633,12 @@ function ViewsChart({ points }: any) {
             />
             <polyline points={coordinates} />
             {data.map((item, index) => {
-              const [x, y] = coordinates.split(" ")[index].split(",");
+              const point = pointPositions[index];
               return (
-                <circle key={item.date} cx={x} cy={y} r="5">
-                  <title>{hoverLabel(item)}</title>
-                </circle>
+                <circle key={item.date} cx={point.x} cy={point.y} r="6" tabIndex={0} onMouseEnter={() => setHovered(index)} onFocus={() => setHovered(index)} />
               );
             })}
+            {hovered !== null && hoveredPoint && <g className="views-chart-tooltip" transform={`translate(${Math.max(8, Math.min(width - 214, hoveredPoint.x - 102))},${Math.max(4, hoveredPoint.y - 35)})`}><rect width="204" height="26" rx="6"/><text x="10" y="17">{hoverLabel(data[hovered])}</text></g>}
           </svg>
           <div className="views-chart-labels">
             <span>{format(data[0].date)}</span>
