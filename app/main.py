@@ -799,14 +799,14 @@ def dashboard(period:str="total",s:Session=Depends(db)):
 
 @app.get("/api/insights/views-chart")
 def insight_views_chart(period:str="24h",start:str|None=None,end:str|None=None,s:Session=Depends(db)):
-    """Current views grouped by Reel publication hour/day for the chosen period."""
+    """Cumulative official views at each recorded insight measurement."""
     now=datetime.utcnow()
     if period=="24h":
         first=(now.replace(minute=0,second=0,microsecond=0)-timedelta(hours=23)); totals={first+timedelta(hours=index):0 for index in range(24)}; cutoff=first
-        def bucket(value:datetime): return value.replace(minute=0,second=0,microsecond=0)
+        def bucket_end(value:datetime): return value+timedelta(hours=1)-timedelta(microseconds=1)
     elif period in {"7d","30d"}:
         days=7 if period=="7d" else 30; first=(now.date()-timedelta(days=days-1)); totals={first+timedelta(days=index):0 for index in range(days)}; cutoff=datetime.combine(first,time.min)
-        def bucket(value:datetime): return value.date()
+        def bucket_end(value:date): return datetime.combine(value,time.max)
     else:
         try: start_date=date.fromisoformat(start) if start else now.date()
         except ValueError: raise HTTPException(422,"Data inicial inválida")
@@ -815,13 +815,25 @@ def insight_views_chart(period:str="24h",start:str|None=None,end:str|None=None,s
         if end_date<start_date: raise HTTPException(422,"A data final deve ser igual ou posterior à inicial")
         if (end_date-start_date).days>366: raise HTTPException(422,"Escolha um intervalo de até 366 dias")
         totals={start_date+timedelta(days=index):0 for index in range((end_date-start_date).days+1)}; cutoff=datetime.combine(start_date,time.min)
-        def bucket(value:datetime): return value.date()
-    for reel in s.scalars(select(InstagramReel)):
-        # Insights são um histórico: Reels já publicados continuam no gráfico
-        # mesmo se a conta cair depois. Só a fila operacional exclui contas inaptas.
-        if not reel.published_at or reel.published_at<cutoff: continue
-        key=bucket(reel.published_at)
-        if key in totals: totals[key]+=reel.views
+        def bucket_end(value:date): return datetime.combine(value,time.max)
+    # Snapshots are cumulative counts. Carry the latest known value for every
+    # Reel forward from one point to the next; blank hours therefore keep the
+    # total instead of incorrectly becoming zero just because no Reel was
+    # published in that hour.
+    snapshots=list(s.scalars(select(InstagramReelSnapshot).order_by(InstagramReelSnapshot.captured_at)))
+    values_by_reel:dict[int,int]={}; index=0
+    for key in totals:
+        boundary=bucket_end(key)
+        while index<len(snapshots) and snapshots[index].captured_at<=boundary:
+            snapshot=snapshots[index]
+            values_by_reel[snapshot.reel_id]=snapshot.views
+            index+=1
+        totals[key]=sum(values_by_reel.values())
+    # A freshly migrated installation can have Reel rows before its first
+    # sync. Show their official current total rather than an empty chart.
+    if not snapshots:
+        fallback=sum(reel.views for reel in s.scalars(select(InstagramReel)))
+        totals={key:fallback for key in totals}
     return {"period":period,"points":[{"date":key.isoformat(),"views":views} for key,views in totals.items()]}
 @app.get("/api/scheduled-posts")
 def scheduled_posts(s:Session=Depends(db)):
