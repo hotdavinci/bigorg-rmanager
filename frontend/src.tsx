@@ -1598,11 +1598,14 @@ function ViewsChart({ points }: any) {
     height = 130,
     padding = 12,
     max = Math.max(1, ...data.map((item) => Number(item.views) || 0));
-  const pointPositions = data.map((item, index) => ({
-    x: padding + (data.length < 2 ? 0 : (index * (width - padding * 2)) / (data.length - 1)),
-    y: height - padding - ((Number(item.views) || 0) / max) * (height - padding * 2),
-  }));
-  const coordinates = pointPositions.map((point) => `${point.x},${point.y}`).join(" ");
+  const chartWidth = width - padding * 2;
+  const columnWidth = Math.max(5, Math.min(28, (chartWidth / Math.max(data.length, 1)) * 0.64));
+  const columns = data.map((item, index) => {
+    const value = Number(item.views) || 0;
+    const barHeight = (value / max) * (height - padding * 2);
+    const slot = chartWidth / Math.max(data.length, 1);
+    return { x: padding + index * slot + (slot - columnWidth) / 2, y: height - padding - barHeight, height: barHeight };
+  });
   const dateOf = (value: string) =>
     new Date(value.includes("T") ? value : `${value}T12:00:00`);
   const format = (value: string) =>
@@ -1613,8 +1616,8 @@ function ViewsChart({ points }: any) {
       minute: data.length === 24 ? "2-digit" : undefined,
     });
   const hoverLabel = (item: any) =>
-    `${dateOf(item.date).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: item.date.includes("T") ? "short" : undefined })} · ${Number(item.views || 0).toLocaleString("pt-BR")} views`;
-  const hoveredPoint = hovered === null ? null : pointPositions[hovered];
+    `${dateOf(item.date).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: item.date.includes("T") ? "short" : undefined })} · ${Number(item.views || 0).toLocaleString("pt-BR")} novas views`;
+  const hoveredColumn = hovered === null ? null : columns[hovered];
   return (
     <div className="views-chart">
       {data.length ? (
@@ -1631,18 +1634,17 @@ function ViewsChart({ points }: any) {
               x2={width - padding}
               y2={height - padding}
             />
-            <polyline points={coordinates} />
             {data.map((item, index) => {
-              const point = pointPositions[index];
+              const column = columns[index];
               return (
-                <circle key={item.date} cx={point.x} cy={point.y} r="6" tabIndex={0} onMouseEnter={() => setHovered(index)} onFocus={() => setHovered(index)} />
+                <rect key={item.date} className="views-chart-bar" x={column.x} y={column.y} width={columnWidth} height={Math.max(2,column.height)} rx="3" tabIndex={0} onMouseEnter={() => setHovered(index)} onFocus={() => setHovered(index)} />
               );
             })}
-            {hovered !== null && hoveredPoint && <g className="views-chart-tooltip" transform={`translate(${Math.max(8, Math.min(width - 214, hoveredPoint.x - 102))},${Math.max(4, hoveredPoint.y - 35)})`}><rect width="204" height="26" rx="6"/><text x="10" y="17">{hoverLabel(data[hovered])}</text></g>}
+            {hovered !== null && hoveredColumn && <g className="views-chart-tooltip" transform={`translate(${Math.max(8, Math.min(width - 214, hoveredColumn.x + columnWidth / 2 - 102))},${Math.max(4, hoveredColumn.y - 35)})`}><rect width="204" height="26" rx="6"/><text x="10" y="17">{hoverLabel(data[hovered])}</text></g>}
           </svg>
           <div className="views-chart-labels">
             <span>{format(data[0].date)}</span>
-            <b>{max.toLocaleString("pt-BR")} views no pico</b>
+            <b>{max.toLocaleString("pt-BR")} novas views no pico</b>
             <span>{format(data[data.length - 1].date)}</span>
           </div>
         </>
@@ -1736,7 +1738,7 @@ function DashboardHome({
         <div className="panel-heading">
           <div>
             <h2>Insights</h2>
-            <p>Views atuais dos Reels publicados no intervalo escolhido.</p>
+            <p>Novas views registradas em cada horário ou dia do intervalo.</p>
           </div>
           <div className="chart-filters">
             <div className="chart-periods">
