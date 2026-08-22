@@ -793,7 +793,9 @@ def dashboard(period:str="total",s:Session=Depends(db)):
         if not any(account_id in healthy_ids for account_id in linked_ids): continue
         progress=load_generation_progress(campaign.id) or {}
         pending+=max(0,int(progress.get("total",0))-int(progress.get("completed",0)))
-    published=[post for post in posts if post.status==PostStatus.PUBLISHED and (not cutoff or cutoff<=post.scheduled_for<=now)]
+    # Published is historical, like Insights. It intentionally includes Reels
+    # from accounts that later became unavailable or were removed from the UI.
+    published=[reel for reel in s.scalars(select(InstagramReel)) if reel.published_at and (not cutoff or cutoff<=reel.published_at<=now)]
     upcoming=sorted(future,key=lambda post:post.scheduled_for)[:5]
     return {"period":period,"contas_aptas":len(healthy),"agendados":len(future),"pendentes":pending,"publicados":len(published),"proximas":[{"id":post.id,"quando":post.scheduled_for,"legenda":post.caption} for post in upcoming]}
 
