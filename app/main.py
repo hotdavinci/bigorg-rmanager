@@ -90,7 +90,7 @@ def _clone_processed_for_schedule(session: Session, campaign_id: int, original_m
     session.add(output); session.flush()
     return output
 
-def materialize_missing_schedule_for_account(session: Session, campaign: Campaign, account: InstagramAccount) -> int:
+def materialize_missing_schedule_for_account(session: Session, campaign: Campaign, account: InstagramAccount, not_before: datetime|None=None) -> int:
     """Adds only future, missing slots. It never edits an existing publication."""
     rule=session.scalar(select(CampaignScheduleRule).where(CampaignScheduleRule.campaign_id==campaign.id))
     if not rule: return 0
@@ -116,7 +116,7 @@ def materialize_missing_schedule_for_account(session: Session, campaign: Campaig
             # Stable randomness means a restart calculates the same occurrence.
             rng=random.Random(f"campaign:{campaign.id}:account:{account.id}:slot:{position}")
             minute=rng.randint(low,high); when=datetime.combine(current,time())+timedelta(minutes=minute)
-            if when<=now: continue
+            if when<=now or (not_before and when<not_before): continue
             source_id=rng.choice(sources) if rule.strategy=="random" else sources[position%len(sources)]
             seeds=list(session.scalars(select(Media).where(Media.kind=="processed",Media.original_media_id==source_id)))
             seed=next((media for media in reversed(seeds) if data_path(media.relative_path).is_file()),None)
@@ -139,12 +139,26 @@ def account_campaign_sync_delay_days(session: Session) -> int:
     except (TypeError,ValueError): return 1
 
 def schedule_account_campaign_sync(session: Session, account: InstagramAccount) -> int:
-    """OAuth never adds an account immediately; it only starts its waiting period."""
+    """Sets the first allowed publication time for a newly connected account."""
     days=account_campaign_sync_delay_days(session)
     account.campaign_sync_due_at=account.connected_at+timedelta(days=days)
     account.campaign_sync_completed_at=None
-    audit(session,"ACCOUNT_SYNC_WAITING",f"Conta validada; entrada automática em campanhas ativas após {days} dia(s).",account_id=account.id)
+    audit(session,"ACCOUNT_SYNC_WAITING",f"Conta validada; os horários anteriores a {account.campaign_sync_due_at:%d/%m/%Y %H:%M} serão ignorados.",account_id=account.id)
     return days
+
+def sync_account_to_active_campaigns(session: Session, account: InstagramAccount, not_before: datetime|None=None) -> tuple[int,int]:
+    """Links a valid account once and materializes only still-allowed future slots."""
+    added=created=0
+    for campaign in session.scalars(select(Campaign).where(Campaign.status==CampaignStatus.ACTIVE)):
+        linked=session.scalar(select(CampaignAccount).where(CampaignAccount.campaign_id==campaign.id,CampaignAccount.account_id==account.id))
+        if linked: continue
+        exclusion=session.scalar(select(CampaignAccountExclusion).where(CampaignAccountExclusion.campaign_id==campaign.id,CampaignAccountExclusion.account_id==account.id))
+        if exclusion and account.connected_at<=exclusion.removed_at: continue
+        session.add(CampaignAccount(campaign_id=campaign.id,account_id=account.id)); session.flush()
+        count=materialize_missing_schedule_for_account(session,campaign,account,not_before=not_before)
+        audit(session,"ACCOUNT_ADDED",f"Conta adicionada automaticamente; {count} agendamento(s) futuro(s) criado(s).",campaign.id,account.id)
+        added+=1; created+=count
+    return added,created
 
 def sync_due_connected_accounts(session: Session) -> dict:
     """One-time, database-backed sync for accounts whose configured wait ended."""
@@ -159,15 +173,8 @@ def sync_due_connected_accounts(session: Session) -> dict:
         # OAuth reconnection resets due_at and is the only way it can return.
         if not account_is_eligible(account,now):
             continue
-        for campaign in session.scalars(select(Campaign).where(Campaign.status==CampaignStatus.ACTIVE)):
-            linked=session.scalar(select(CampaignAccount).where(CampaignAccount.campaign_id==campaign.id,CampaignAccount.account_id==account.id))
-            if linked: continue
-            exclusion=session.scalar(select(CampaignAccountExclusion).where(CampaignAccountExclusion.campaign_id==campaign.id,CampaignAccountExclusion.account_id==account.id))
-            if exclusion and account.connected_at<=exclusion.removed_at: continue
-            session.add(CampaignAccount(campaign_id=campaign.id,account_id=account.id)); session.flush()
-            count=materialize_missing_schedule_for_account(session,campaign,account)
-            audit(session,"ACCOUNT_ADDED",f"Conta adicionada após o prazo configurado; {count} agendamento(s) futuro(s) criado(s).",campaign.id,account.id)
-            added+=1; created+=count
+        linked_count,created_count=sync_account_to_active_campaigns(session,account)
+        added+=linked_count; created+=created_count
         account.campaign_sync_completed_at=now
         audit(session,"ACCOUNT_SYNC_COMPLETED",f"Sincronização automática concluída: {added} vínculo(s) e {created} agendamento(s) futuro(s).",account_id=account.id)
         completed+=1
@@ -718,7 +725,9 @@ async def oauth_callback(code:str|None=None,state:str|None=None,error:str|None=N
         else: account.encrypted_token=meta.encrypt(token)
         account.username=profile.get("username",""); account.display_name=profile.get("name",account.username); account.profile_picture_url=profile.get("profile_picture_url",""); account.token_expires_at=expires; account.active=True; account.deleted_at=None; account.connected_at=datetime.utcnow(); account.last_verified_at=datetime.utcnow(); account.last_error=""
         days=schedule_account_campaign_sync(s,account)
-        audit(s,"ACCOUNT_RECONNECTED",f"Conta reconectada e validada via OAuth; será sincronizada em {days} dia(s).",account_id=account.id)
+        added,created=sync_account_to_active_campaigns(s,account,not_before=account.campaign_sync_due_at)
+        account.campaign_sync_completed_at=datetime.utcnow()
+        audit(s,"ACCOUNT_RECONNECTED",f"Conta reconectada e validada via OAuth; {added} campanha(s) vinculada(s), {created} horário(s) futuro(s) criado(s) após o prazo de {days} dia(s).",account_id=account.id)
         commit_with_retry(s)
         return HTMLResponse("<script>window.opener&&window.opener.location.reload();window.close()</script><h2>Conta conectada com sucesso.</h2><p>Você já pode fechar esta janela e voltar ao Reels Manager.</p>")
     except HTTPException as e: return HTMLResponse(f"<h2>Não foi possível conectar a conta.</h2><p>{e.detail}</p>",e.status_code)
