@@ -1829,30 +1829,21 @@ function DashboardHome({
         {reels.length ? (
           <div className="dashboard-reels">
             {reels.map((reel: any, index: number) => {
-              const poster = reel.cached_thumbnail_url || reel.thumbnail_url;
               const video = reel.cached_video_url
                 ? `${apiBaseUrl}${reel.cached_video_url}`
-                : "";
-              const source = poster
-                ? poster.startsWith("/")
-                  ? `${apiBaseUrl}${poster}`
-                  : poster
                 : "";
               return (
                 <article className="dashboard-reel" key={reel.id}>
                   {video ? (
                     <video
                       src={video}
-                      poster={source || undefined}
                       controls
                       muted
-                      preload="metadata"
+                      preload="auto"
                     />
-                  ) : source ? (
-                    <img src={source} alt={`Reel de @${reel.conta}`} />
                   ) : (
                     <div className="insight-placeholder">
-                      <Film size={22} />
+                      <Film size={22} /> Vídeo sendo preservado…
                     </div>
                   )}
                   <div>
