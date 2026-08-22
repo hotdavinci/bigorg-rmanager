@@ -1201,6 +1201,9 @@ def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(
     if not c or c.status not in (CampaignStatus.DRAFT,CampaignStatus.PROCESSING_FAILED,CampaignStatus.READY_TO_SCHEDULE): raise HTTPException(409,"Esta campanha não pode gerar uma nova agenda agora")
     if body.days<1 or body.days>366 or not body.intervals: raise HTTPException(422,"Informe dias e ao menos um intervalo")
     accounts=list(s.scalars(select(CampaignAccount.account_id).where(CampaignAccount.campaign_id==campaign_id)))
+    # New accounts are linked right away, while this timestamp protects the
+    # beginning of their schedule during the configured onboarding delay.
+    account_not_before={account_id:(s.get(InstagramAccount,account_id).campaign_sync_due_at if s.get(InstagramAccount,account_id) else None) for account_id in accounts}
     sources=list(s.scalars(select(CampaignSourceMedia.media_id).where(CampaignSourceMedia.campaign_id==campaign_id)))
     caption_items=json.loads(s.get(CaptionList,c.caption_list_id).items_json) if c.caption_list_id and s.get(CaptionList,c.caption_list_id) else []
     if not accounts or not sources: raise HTTPException(422,"Selecione ao menos uma conta e uma mídia original")
@@ -1232,6 +1235,15 @@ def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(
         if current<date.today(): continue
         for low,high in ranges:
             for account_id in accounts:
+                protected_until=account_not_before.get(account_id)
+                delayed_low=low
+                if protected_until:
+                    if current<protected_until.date():
+                        continue
+                    if current==protected_until.date():
+                        delayed_low=max(low,protected_until.hour*60+protected_until.minute)
+                        if delayed_low>high:
+                            continue
                 if current==date.today():
                     earliest=datetime.now()+timedelta(minutes=5)
                     if high < earliest.hour*60+earliest.minute: continue
@@ -1242,7 +1254,7 @@ def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(
                     choices=[text for text in caption_items if text!=previous_caption_by_account.get(account_id)] or caption_items
                     caption=random.choice(choices); previous_caption_by_account[account_id]=caption
                 else: caption=""
-                jobs.append({"slot_key":f"slot-{uuid.uuid4().hex}","source_id":source_id,"account_id":account_id,"current":current,"low":low,"high":high,"caption":caption})
+                jobs.append({"slot_key":f"slot-{uuid.uuid4().hex}","source_id":source_id,"account_id":account_id,"current":current,"low":delayed_low,"high":high,"caption":caption})
     batch_size=max(1,min(settings.processing_batch_size,50))
     save_generation_progress(campaign_id,status="RUNNING",total=len(jobs),completed=0,scheduled=0,failed=0,batch_size=batch_size,message="Preparando os lotes de vídeos...",started_at=datetime.utcnow().isoformat())
     scheduled=0
