@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     scheduler_parallelism: int = 2
     scheduler_max_attempts: int = 3
     scheduler_claim_timeout_seconds: int = 900
-    insights_sync_hours: int = 6
+    insights_sync_hours: int = 1
     insights_reels_limit: int = 100
     account_health_check_minutes: int = 15
     admin_email: str = "hotdavinci@gmail.com"

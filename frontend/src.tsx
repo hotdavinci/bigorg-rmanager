@@ -1597,15 +1597,34 @@ function ViewsChart({ points }: any) {
   const width = 720,
     height = 130,
     padding = 12,
-    max = Math.max(1, ...data.map((item) => Number(item.views) || 0));
-  const chartWidth = width - padding * 2;
-  const columnWidth = Math.max(5, Math.min(28, (chartWidth / Math.max(data.length, 1)) * 0.64));
-  const columns = data.map((item, index) => {
-    const value = Number(item.views) || 0;
-    const barHeight = (value / max) * (height - padding * 2);
-    const slot = chartWidth / Math.max(data.length, 1);
-    return { x: padding + index * slot + (slot - columnWidth) / 2, y: height - padding - barHeight, height: barHeight };
+    measured = data.filter((item) => item.views !== null && item.views !== undefined),
+    max = Math.max(1, ...measured.map((item) => Number(item.views) || 0));
+  const pointPositions = data.map((item, index) => {
+    if (item.views === null || item.views === undefined) return null;
+    return {
+      x: padding + (data.length < 2 ? 0 : (index * (width - padding * 2)) / (data.length - 1)),
+      y: height - padding - ((Number(item.views) || 0) / max) * (height - padding * 2),
+    };
   });
+  const segments: Array<Array<{ x: number; y: number }>> = [];
+  let currentSegment: Array<{ x: number; y: number }> = [];
+  pointPositions.forEach((point) => {
+    if (point) currentSegment.push(point);
+    else if (currentSegment.length) { segments.push(currentSegment); currentSegment = []; }
+  });
+  if (currentSegment.length) segments.push(currentSegment);
+  const smoothPath = (segment: Array<{ x: number; y: number }>) => {
+    if (segment.length < 2) return "";
+    let path = `M ${segment[0].x} ${segment[0].y}`;
+    for (let index = 1; index < segment.length - 1; index++) {
+      const previous = segment[index];
+      const next = segment[index + 1];
+      path += ` Q ${previous.x} ${previous.y} ${(previous.x + next.x) / 2} ${(previous.y + next.y) / 2}`;
+    }
+    const last = segment[segment.length - 1];
+    path += ` L ${last.x} ${last.y}`;
+    return path;
+  };
   const dateOf = (value: string) =>
     new Date(value.includes("T") ? value : `${value}T12:00:00`);
   const format = (value: string) =>
@@ -1617,7 +1636,7 @@ function ViewsChart({ points }: any) {
     });
   const hoverLabel = (item: any) =>
     `${dateOf(item.date).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: item.date.includes("T") ? "short" : undefined })} · ${Number(item.views || 0).toLocaleString("pt-BR")} novas views`;
-  const hoveredColumn = hovered === null ? null : columns[hovered];
+  const hoveredPoint = hovered === null ? null : pointPositions[hovered];
   return (
     <div className="views-chart">
       {data.length ? (
@@ -1634,13 +1653,12 @@ function ViewsChart({ points }: any) {
               x2={width - padding}
               y2={height - padding}
             />
+            {segments.map((segment, index) => <path className="views-chart-line" key={index} d={smoothPath(segment)} />)}
             {data.map((item, index) => {
-              const column = columns[index];
-              return (
-                <rect key={item.date} className="views-chart-bar" x={column.x} y={column.y} width={columnWidth} height={Math.max(2,column.height)} rx="3" tabIndex={0} onMouseEnter={() => setHovered(index)} onFocus={() => setHovered(index)} />
-              );
+              const point = pointPositions[index];
+              return point ? <circle key={item.date} cx={point.x} cy={point.y} r="5" tabIndex={0} onMouseEnter={() => setHovered(index)} onFocus={() => setHovered(index)} /> : null;
             })}
-            {hovered !== null && hoveredColumn && <g className="views-chart-tooltip" transform={`translate(${Math.max(8, Math.min(width - 214, hoveredColumn.x + columnWidth / 2 - 102))},${Math.max(4, hoveredColumn.y - 35)})`}><rect width="204" height="26" rx="6"/><text x="10" y="17">{hoverLabel(data[hovered])}</text></g>}
+            {hovered !== null && hoveredPoint && <g className="views-chart-tooltip" transform={`translate(${Math.max(8, Math.min(width - 214, hoveredPoint.x - 102))},${Math.max(4, hoveredPoint.y - 35)})`}><rect width="204" height="26" rx="6"/><text x="10" y="17">{hoverLabel(data[hovered])}</text></g>}
           </svg>
           <div className="views-chart-labels">
             <span>{format(data[0].date)}</span>

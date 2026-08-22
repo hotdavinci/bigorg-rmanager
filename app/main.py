@@ -807,10 +807,10 @@ def insight_views_chart(period:str="24h",start:str|None=None,end:str|None=None,s
     """New views measured in each selected hour/day, never a cumulative total."""
     now=datetime.utcnow()
     if period=="24h":
-        first=(now.replace(minute=0,second=0,microsecond=0)-timedelta(hours=23)); totals={first+timedelta(hours=index):0 for index in range(24)}; cutoff=first
+        first=(now.replace(minute=0,second=0,microsecond=0)-timedelta(hours=23)); totals={first+timedelta(hours=index):None for index in range(24)}; cutoff=first
         def bucket(value:datetime): return value.replace(minute=0,second=0,microsecond=0)
     elif period in {"7d","30d"}:
-        days=7 if period=="7d" else 30; first=(now.date()-timedelta(days=days-1)); totals={first+timedelta(days=index):0 for index in range(days)}; cutoff=datetime.combine(first,time.min)
+        days=7 if period=="7d" else 30; first=(now.date()-timedelta(days=days-1)); totals={first+timedelta(days=index):None for index in range(days)}; cutoff=datetime.combine(first,time.min)
         def bucket(value:datetime): return value.date()
     else:
         try: start_date=date.fromisoformat(start) if start else now.date()
@@ -819,7 +819,7 @@ def insight_views_chart(period:str="24h",start:str|None=None,end:str|None=None,s
         except ValueError: raise HTTPException(422,"Data final inválida")
         if end_date<start_date: raise HTTPException(422,"A data final deve ser igual ou posterior à inicial")
         if (end_date-start_date).days>366: raise HTTPException(422,"Escolha um intervalo de até 366 dias")
-        totals={start_date+timedelta(days=index):0 for index in range((end_date-start_date).days+1)}; cutoff=datetime.combine(start_date,time.min)
+        totals={start_date+timedelta(days=index):None for index in range((end_date-start_date).days+1)}; cutoff=datetime.combine(start_date,time.min)
         def bucket(value:datetime): return value.date()
     # Meta returns cumulative counters. For a useful timeline we keep the
     # previous measurement per Reel and add only its positive increase to the
@@ -832,7 +832,7 @@ def insight_views_chart(period:str="24h",start:str|None=None,end:str|None=None,s
         previous_by_reel[snapshot.reel_id]=snapshot.views
         key=bucket(snapshot.captured_at)
         if snapshot.captured_at>=cutoff and key in totals:
-            totals[key]+=increase
+            totals[key]=(totals[key] or 0)+increase
     return {"period":period,"points":[{"date":key.isoformat(),"views":views} for key,views in totals.items()]}
 @app.get("/api/scheduled-posts")
 def scheduled_posts(s:Session=Depends(db)):
