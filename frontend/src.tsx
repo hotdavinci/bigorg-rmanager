@@ -1858,6 +1858,17 @@ function DashboardHome({
                       {reel.likes || 0} <MessageCircle size={13} />
                       {reel.comments || 0}
                     </small>
+                    {reel.permalink ? (
+                      <a
+                        className="reel-link"
+                        href={reel.permalink}
+                        target="_blank"
+                        rel="noreferrer"
+                        title="Abrir Reel no Instagram"
+                      >
+                        <ArrowUpRight size={15} /> Abrir Reel
+                      </a>
+                    ) : null}
                   </div>
                 </article>
               );
