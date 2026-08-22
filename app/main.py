@@ -784,6 +784,9 @@ def dashboard(period:str="total",s:Session=Depends(db)):
     healthy_ids={account.id for account in healthy}
     posts=[post for post in s.scalars(select(ScheduledPost)) if post.account_id in healthy_ids]
     queued={PostStatus.PENDING,PostStatus.CLAIMED,PostStatus.UPLOADING,PostStatus.WAITING_META,PostStatus.PUBLISHING}
+    # Every item that is still in the publish queue counts as scheduled, even
+    # if its planned time has just passed and the scheduler is finishing it.
+    scheduled=[post for post in posts if post.status in queued]
     future=[post for post in posts if post.status in queued and post.scheduled_for>=now and (not cutoff or post.scheduled_for<=now+windows[period])]
     # "Pendentes" no painel não são publicações esperando horário. São apenas
     # slots que a geração ainda precisa processar e materializar no banco.
@@ -797,7 +800,7 @@ def dashboard(period:str="total",s:Session=Depends(db)):
     # from accounts that later became unavailable or were removed from the UI.
     published=[reel for reel in s.scalars(select(InstagramReel)) if reel.published_at and (not cutoff or cutoff<=reel.published_at<=now)]
     upcoming=sorted(future,key=lambda post:post.scheduled_for)[:5]
-    return {"period":period,"contas_aptas":len(healthy),"agendados":len(future),"pendentes":pending,"publicados":len(published),"proximas":[{"id":post.id,"quando":post.scheduled_for,"legenda":post.caption} for post in upcoming]}
+    return {"period":period,"contas_aptas":len(healthy),"agendados":len(scheduled),"pendentes":pending,"publicados":len(published),"proximas":[{"id":post.id,"quando":post.scheduled_for,"legenda":post.caption} for post in upcoming]}
 
 @app.get("/api/insights/views-chart")
 def insight_views_chart(period:str="24h",start:str|None=None,end:str|None=None,s:Session=Depends(db)):

@@ -1725,7 +1725,7 @@ function DashboardHome({
         />
         <Metric
           icon={Clock}
-          label="Aguardando horário"
+          label="Processando"
           value={dashboard.pendentes ?? 0}
         />
         <Metric
