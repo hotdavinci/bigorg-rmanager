@@ -1,6 +1,6 @@
 import asyncio, shutil, uuid, secrets, os, sys, subprocess, json, threading, re
 from contextlib import asynccontextmanager
-from datetime import datetime, date, time, timedelta
+from datetime import datetime, date, time, timedelta, timezone
 import random
 from pathlib import Path
 from urllib.parse import urlparse
@@ -805,7 +805,8 @@ def dashboard(period:str="total",s:Session=Depends(db)):
 @app.get("/api/insights/views-chart")
 def insight_views_chart(period:str="24h",start:str|None=None,end:str|None=None,s:Session=Depends(db)):
     """New views measured in each selected hour/day, never a cumulative total."""
-    now=datetime.utcnow()
+    chart_zone=ZoneInfo("America/Sao_Paulo")
+    now=datetime.now(chart_zone).replace(tzinfo=None)
     if period=="24h":
         first=(now.replace(minute=0,second=0,microsecond=0)-timedelta(hours=23)); totals={first+timedelta(hours=index):None for index in range(24)}; cutoff=first
         def bucket(value:datetime): return value.replace(minute=0,second=0,microsecond=0)
@@ -830,8 +831,9 @@ def insight_views_chart(period:str="24h",start:str|None=None,end:str|None=None,s
         previous=previous_by_reel.get(snapshot.reel_id)
         increase=max(0,snapshot.views-previous) if previous is not None else 0
         previous_by_reel[snapshot.reel_id]=snapshot.views
-        key=bucket(snapshot.captured_at)
-        if snapshot.captured_at>=cutoff and key in totals:
+        captured_local=snapshot.captured_at.replace(tzinfo=timezone.utc).astimezone(chart_zone).replace(tzinfo=None)
+        key=bucket(captured_local)
+        if captured_local>=cutoff and key in totals:
             totals[key]=(totals[key] or 0)+increase
     return {"period":period,"points":[{"date":key.isoformat(),"views":views} for key,views in totals.items()]}
 @app.get("/api/scheduled-posts")

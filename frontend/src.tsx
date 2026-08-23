@@ -1656,7 +1656,7 @@ function ViewsChart({ points }: any) {
             {segments.map((segment, index) => <path className="views-chart-line" key={index} d={smoothPath(segment)} />)}
             {data.map((item, index) => {
               const point = pointPositions[index];
-              return point ? <circle key={item.date} cx={point.x} cy={point.y} r="5" tabIndex={0} onMouseEnter={() => setHovered(index)} onFocus={() => setHovered(index)} /> : null;
+              return point ? <rect key={item.date} className="views-chart-hit" x={point.x-12} y={padding} width="24" height={height-padding*2} tabIndex={0} onMouseEnter={() => setHovered(index)} onFocus={() => setHovered(index)} /> : null;
             })}
             {hovered !== null && hoveredPoint && <g className="views-chart-tooltip" transform={`translate(${Math.max(8, Math.min(width - 214, hoveredPoint.x - 102))},${Math.max(4, hoveredPoint.y - 35)})`}><rect width="204" height="26" rx="6"/><text x="10" y="17">{hoverLabel(data[hovered])}</text></g>}
           </svg>
