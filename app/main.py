@@ -810,6 +810,9 @@ def insight_views_chart(period:str="24h",start:str|None=None,end:str|None=None,s
     if period=="24h":
         first=(now.replace(minute=0,second=0,microsecond=0)-timedelta(hours=23)); totals={first+timedelta(hours=index):None for index in range(24)}; cutoff=first
         def bucket(value:datetime): return value.replace(minute=0,second=0,microsecond=0)
+    elif period=="month-hours":
+        first=now.replace(day=1,hour=0,minute=0,second=0,microsecond=0); totals={hour:None for hour in range(24)}; cutoff=first
+        def bucket(value:datetime): return value.hour
     elif period in {"7d","30d"}:
         days=7 if period=="7d" else 30; first=(now.date()-timedelta(days=days-1)); totals={first+timedelta(days=index):None for index in range(days)}; cutoff=datetime.combine(first,time.min)
         def bucket(value:datetime): return value.date()
@@ -835,7 +838,11 @@ def insight_views_chart(period:str="24h",start:str|None=None,end:str|None=None,s
         key=bucket(captured_local)
         if captured_local>=cutoff and key in totals:
             totals[key]=(totals[key] or 0)+increase
-    return {"period":period,"points":[{"date":key.isoformat(),"views":views} for key,views in totals.items()]}
+    if period=="month-hours":
+        points=[{"date":datetime.combine(now.date(),time(hour)).isoformat(),"label":f"{hour:02d}:00","views":views} for hour,views in totals.items()]
+    else:
+        points=[{"date":key.isoformat(),"views":views} for key,views in totals.items()]
+    return {"period":period,"points":points}
 @app.get("/api/scheduled-posts")
 def scheduled_posts(s:Session=Depends(db)):
     posts=s.scalars(select(ScheduledPost).order_by(ScheduledPost.scheduled_for)).all()

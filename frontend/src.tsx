@@ -1635,7 +1635,7 @@ function ViewsChart({ points }: any) {
       minute: data.length === 24 ? "2-digit" : undefined,
     });
   const hoverLabel = (item: any) =>
-    `${dateOf(item.date).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: item.date.includes("T") ? "short" : undefined })} · ${Number(item.views || 0).toLocaleString("pt-BR")} novas views`;
+    `${item.label || dateOf(item.date).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: item.date.includes("T") ? "short" : undefined })} · ${Number(item.views || 0).toLocaleString("pt-BR")} novas views`;
   const hoveredPoint = hovered === null ? null : pointPositions[hovered];
   return (
     <div className="views-chart">
@@ -1661,9 +1661,9 @@ function ViewsChart({ points }: any) {
             {hovered !== null && hoveredPoint && <g className="views-chart-tooltip" transform={`translate(${Math.max(8, Math.min(width - 214, hoveredPoint.x - 102))},${Math.max(4, hoveredPoint.y - 35)})`}><rect width="204" height="26" rx="6"/><text x="10" y="17">{hoverLabel(data[hovered])}</text></g>}
           </svg>
           <div className="views-chart-labels">
-            <span>{format(data[0].date)}</span>
+            <span>{data[0].label || format(data[0].date)}</span>
             <b>{max.toLocaleString("pt-BR")} novas views no pico</b>
-            <span>{format(data[data.length - 1].date)}</span>
+            <span>{data[data.length - 1].label || format(data[data.length - 1].date)}</span>
           </div>
         </>
       ) : (
@@ -1764,6 +1764,7 @@ function DashboardHome({
                 ["24h", "24h"],
                 ["7d", "7 dias"],
                 ["30d", "30 dias"],
+                ["month-hours", "Mês / horários"],
                 ["custom", "Período"],
               ].map(([value, label]) => (
                 <button
