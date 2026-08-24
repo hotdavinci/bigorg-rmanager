@@ -786,7 +786,10 @@ def dashboard(period:str="total",s:Session=Depends(db)):
     queued={PostStatus.PENDING,PostStatus.CLAIMED,PostStatus.UPLOADING,PostStatus.WAITING_META,PostStatus.PUBLISHING}
     # Every item that is still in the publish queue counts as scheduled, even
     # if its planned time has just passed and the scheduler is finishing it.
-    scheduled=[post for post in posts if post.status in queued]
+    # O filtro do resumo também precisa valer para os cartões. Para "24h",
+    # "7d" e "30d", agendado significa uma publicação ainda na fila dentro
+    # da próxima janela escolhida — nunca o total geral disfarçado.
+    scheduled=[post for post in posts if post.status in queued and (not cutoff or now<=post.scheduled_for<=now+windows[period])]
     future=[post for post in posts if post.status in queued and post.scheduled_for>=now and (not cutoff or post.scheduled_for<=now+windows[period])]
     # "Pendentes" no painel não são publicações esperando horário. São apenas
     # slots que a geração ainda precisa processar e materializar no banco.

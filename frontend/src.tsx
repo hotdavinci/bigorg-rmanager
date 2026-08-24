@@ -37,6 +37,9 @@ const api = (path: string, options?: RequestInit) => {
   return fetch(apiUrl(effectivePath), {
     credentials: "include",
     ...options,
+    // Os cartões e o ranking mudam com o período. Não reutilizamos uma
+    // resposta GET antiga do navegador quando o usuário troca o filtro.
+    cache: "no-store",
   }).then(async (response) => {
     if (!response.ok) throw new Error(await response.text());
     return response.json();
@@ -234,12 +237,22 @@ function App() {
   }, [insightPeriod]);
   useEffect(() => {
     if (page !== "Início") return;
-    api(`/dashboard?period=${homePeriod}`)
-      .then(setDashboard)
+    // Um período anterior pode responder depois do novo se a conexão oscilar.
+    // Só aplicamos ao painel a resposta pertencente ao filtro atual.
+    let cancelled = false;
+    Promise.all([
+      api(`/dashboard?period=${homePeriod}`),
+      api(`/insights/reels?period=${homePeriod}`),
+    ])
+      .then(([nextDashboard, nextInsights]) => {
+        if (cancelled) return;
+        setDashboard(nextDashboard);
+        setHomeInsights(nextInsights);
+      })
       .catch(() => {});
-    api(`/insights/reels?period=${homePeriod}`)
-      .then(setHomeInsights)
-      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, [page, homePeriod]);
   useEffect(() => {
     if (page !== "Início") return;
