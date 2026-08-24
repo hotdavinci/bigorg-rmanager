@@ -134,9 +134,6 @@ function App() {
     summary: {},
   });
   const [viewsChart, setViewsChart] = useState<any>({ points: [] });
-  const [chartPeriod, setChartPeriod] = useState("24h");
-  const [chartStart, setChartStart] = useState(localDate());
-  const [chartEnd, setChartEnd] = useState(localDate());
   const [campaigns, setCampaigns] = useState<any[]>([]);
   const [scripts, setScripts] = useState<any[]>([]);
   const [captionLists, setCaptionLists] = useState<any[]>([]);
@@ -256,14 +253,10 @@ function App() {
   }, [page, homePeriod]);
   useEffect(() => {
     if (page !== "Início") return;
-    const query =
-      chartPeriod === "custom"
-        ? `period=custom&start=${chartStart}&end=${chartEnd}`
-        : `period=${chartPeriod}`;
-    api(`/insights/views-chart?${query}`)
+    api(`/insights/views-chart?period=${homePeriod}`)
       .then(setViewsChart)
       .catch(() => {});
-  }, [page, chartPeriod, chartStart, chartEnd]);
+  }, [page, homePeriod]);
   useEffect(() => {
     if (page !== "Insights") return;
     let cancelled = false;
@@ -965,12 +958,6 @@ function App() {
             setPeriod={setHomePeriod}
             insights={homeInsights}
             chart={viewsChart}
-            chartPeriod={chartPeriod}
-            setChartPeriod={setChartPeriod}
-            chartStart={chartStart}
-            setChartStart={setChartStart}
-            chartEnd={chartEnd}
-            setChartEnd={setChartEnd}
             agenda={agenda}
             agendaMonth={agendaMonth}
             setAgendaMonth={setAgendaMonth}
@@ -1691,12 +1678,6 @@ function DashboardHome({
   setPeriod,
   insights,
   chart,
-  chartPeriod,
-  setChartPeriod,
-  chartStart,
-  setChartStart,
-  chartEnd,
-  setChartEnd,
   agenda,
   agendaMonth,
   setAgendaMonth,
@@ -1770,47 +1751,6 @@ function DashboardHome({
           <div>
             <h2>Insights</h2>
             <p>Novas views registradas em cada horário ou dia do intervalo.</p>
-          </div>
-          <div className="chart-filters">
-            <div className="chart-periods">
-              {[
-                ["24h", "24h"],
-                ["7d", "7 dias"],
-                ["30d", "30 dias"],
-                ["month-hours", "Mês / horários"],
-                ["custom", "Período"],
-              ].map(([value, label]) => (
-                <button
-                  key={value}
-                  className={chartPeriod === value ? "primary" : "secondary"}
-                  onClick={() => setChartPeriod(value)}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-            {chartPeriod === "custom" && (
-              <>
-                <label>
-                  De
-                  <input
-                    type="date"
-                    value={chartStart}
-                    max={chartEnd}
-                    onChange={(event) => setChartStart(event.target.value)}
-                  />
-                </label>
-                <label>
-                  Até
-                  <input
-                    type="date"
-                    value={chartEnd}
-                    min={chartStart}
-                    onChange={(event) => setChartEnd(event.target.value)}
-                  />
-                </label>
-              </>
-            )}
           </div>
         </div>
         <ViewsChart points={chart.points} />

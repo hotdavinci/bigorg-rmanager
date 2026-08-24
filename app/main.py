@@ -813,6 +813,14 @@ def insight_views_chart(period:str="24h",start:str|None=None,end:str|None=None,s
     if period=="24h":
         first=(now.replace(minute=0,second=0,microsecond=0)-timedelta(hours=23)); totals={first+timedelta(hours=index):None for index in range(24)}; cutoff=first
         def bucket(value:datetime): return value.replace(minute=0,second=0,microsecond=0)
+    elif period=="total":
+        earliest=s.scalar(select(func.min(InstagramReelSnapshot.captured_at)))
+        if earliest:
+            first=earliest.replace(tzinfo=timezone.utc).astimezone(chart_zone).date()
+        else:
+            first=now.date()
+        totals={first+timedelta(days=index):None for index in range((now.date()-first).days+1)}; cutoff=datetime.combine(first,time.min)
+        def bucket(value:datetime): return value.date()
     elif period=="month-hours":
         first=now.replace(day=1,hour=0,minute=0,second=0,microsecond=0); totals={hour:None for hour in range(24)}; cutoff=first
         def bucket(value:datetime): return value.hour
