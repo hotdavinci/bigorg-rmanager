@@ -1578,7 +1578,7 @@ function App() {
     </main>
   );
 }
-function Metric({ icon: Icon, label, value }: any) {
+function Metric({ icon: Icon, label, value, hint }: any) {
   return (
     <div className="card metric">
       <div className="icon">
@@ -1587,6 +1587,7 @@ function Metric({ icon: Icon, label, value }: any) {
       <div>
         <small>{label}</small>
         <strong>{value}</strong>
+        {hint && <em className="metric-hint">{hint}</em>}
       </div>
     </div>
   );
@@ -1740,6 +1741,7 @@ function DashboardHome({
           icon={Clock}
           label="Processando"
           value={dashboard.pendentes ?? 0}
+          hint={dashboard.processing_message}
         />
         <Metric
           icon={CheckCircle2}

@@ -24,6 +24,12 @@ from .tunnel import tunnel
 from .media_gateway import media_app
 import uvicorn
 
+# A entrada de uma conta pode criar muitas cópias processadas para campanhas
+# já ativas. Isso nunca deve acontecer dentro da requisição OAuth nem travar o
+# loop do servidor web.
+account_sync_threads:set[int]=set()
+account_sync_threads_lock=threading.Lock()
+
 def db():
     s=DbSession()
     try: yield s
@@ -146,7 +152,7 @@ def schedule_account_campaign_sync(session: Session, account: InstagramAccount) 
     audit(session,"ACCOUNT_SYNC_WAITING",f"Conta validada; os horários anteriores a {account.campaign_sync_due_at:%d/%m/%Y %H:%M} serão ignorados.",account_id=account.id)
     return days
 
-def sync_account_to_active_campaigns(session: Session, account: InstagramAccount, not_before: datetime|None=None) -> tuple[int,int]:
+def sync_account_to_active_campaigns(session: Session, account: InstagramAccount, not_before: datetime|None=None, on_campaign=None) -> tuple[int,int]:
     """Links a valid account once and materializes only still-allowed future slots."""
     added=created=0
     for campaign in session.scalars(select(Campaign).where(Campaign.status==CampaignStatus.ACTIVE)):
@@ -155,10 +161,85 @@ def sync_account_to_active_campaigns(session: Session, account: InstagramAccount
         exclusion=session.scalar(select(CampaignAccountExclusion).where(CampaignAccountExclusion.campaign_id==campaign.id,CampaignAccountExclusion.account_id==account.id))
         if exclusion and account.connected_at<=exclusion.removed_at: continue
         session.add(CampaignAccount(campaign_id=campaign.id,account_id=account.id)); session.flush()
+        # O vínculo é curto e persistido antes de iniciar as cópias. Assim a
+        # campanha já reconhece a conta, mesmo que o restante leve minutos.
+        commit_with_retry(session)
         count=materialize_missing_schedule_for_account(session,campaign,account,not_before=not_before)
+        commit_with_retry(session)
         audit(session,"ACCOUNT_ADDED",f"Conta adicionada automaticamente; {count} agendamento(s) futuro(s) criado(s).",campaign.id,account.id)
+        commit_with_retry(session)
         added+=1; created+=count
+        if on_campaign: on_campaign(campaign.id,count)
     return added,created
+
+def account_sync_progress_path(account_id:int) -> Path:
+    return settings.data_dir/"workspaces"/f"account-sync-{account_id}.json"
+
+def save_account_sync_progress(account_id:int, **values):
+    path=account_sync_progress_path(account_id); path.parent.mkdir(parents=True,exist_ok=True)
+    payload={"account_id":account_id,"updated_at":datetime.utcnow().isoformat(),**values}
+    temporary=path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    temporary.write_text(json.dumps(payload,ensure_ascii=False),encoding="utf-8")
+    temporary.replace(path)
+
+def load_account_sync_progress(account_id:int) -> dict:
+    try:
+        path=account_sync_progress_path(account_id)
+        return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    except (OSError,json.JSONDecodeError): return {}
+
+def estimated_account_sync_slots(session:Session, account:InstagramAccount) -> int:
+    """A contagem é apenas para o painel, sem criar nenhum post ainda."""
+    total=0; now=datetime.now()
+    for campaign in session.scalars(select(Campaign).where(Campaign.status==CampaignStatus.ACTIVE)):
+        if session.scalar(select(CampaignAccount).where(CampaignAccount.campaign_id==campaign.id,CampaignAccount.account_id==account.id)): continue
+        rule=session.scalar(select(CampaignScheduleRule).where(CampaignScheduleRule.campaign_id==campaign.id))
+        if not rule: continue
+        try: ranges=parse_intervals([item for item in rule.intervals.split(",") if item])
+        except ValueError: continue
+        try: start=date.fromisoformat(rule.start_date)
+        except ValueError: continue
+        for offset in range(rule.days):
+            current=start+timedelta(days=offset)
+            if current<now.date(): continue
+            for low,high in ranges:
+                when=datetime.combine(current,time())+timedelta(minutes=low)
+                if when>now and (not account.campaign_sync_due_at or when>=account.campaign_sync_due_at): total+=1
+    return total
+
+def run_account_campaign_sync_background(account_id:int):
+    """Materializa a nova conta sem segurar a resposta do OAuth ou o site."""
+    try:
+        with DbSession() as session:
+            account=session.get(InstagramAccount,account_id)
+            if not account or not account_is_eligible(account):
+                save_account_sync_progress(account_id,status="FAILED",message="A conta deixou de estar apta antes da sincronização.",finished_at=datetime.utcnow().isoformat())
+                return
+            total=estimated_account_sync_slots(session,account)
+            save_account_sync_progress(account_id,status="RUNNING",total=total,completed=0,scheduled=0,message=f"Preparando {total} vídeo(s) para as campanhas ativas...",started_at=datetime.utcnow().isoformat())
+            completed=scheduled=0
+            def report(campaign_id:int,created:int):
+                nonlocal completed,scheduled
+                # Cada post criado já está no banco. O contador representa o
+                # que deixou de estar pendente, sem esperar a campanha inteira.
+                completed+=created; scheduled+=created
+                save_account_sync_progress(account_id,status="RUNNING",total=total,completed=min(completed,total),scheduled=scheduled,message=f"Preparando a agenda da nova conta: {scheduled}/{total} vídeo(s).",campaign_id=campaign_id)
+            added,created=sync_account_to_active_campaigns(session,account,not_before=account.campaign_sync_due_at,on_campaign=report)
+            account.campaign_sync_completed_at=datetime.utcnow()
+            audit(session,"ACCOUNT_SYNC_COMPLETED",f"Sincronização em segundo plano concluída: {added} vínculo(s) e {created} agendamento(s) futuro(s).",account_id=account.id)
+            commit_with_retry(session)
+            save_account_sync_progress(account_id,status="COMPLETED",total=total,completed=total,scheduled=created,message=f"Conta sincronizada: {created} agendamento(s) futuro(s) criado(s).",finished_at=datetime.utcnow().isoformat())
+    except Exception as exc:
+        save_account_sync_progress(account_id,status="FAILED",message="A sincronização automática parou com erro.",error=str(exc)[:2000],finished_at=datetime.utcnow().isoformat())
+    finally:
+        with account_sync_threads_lock: account_sync_threads.discard(account_id)
+
+def queue_account_campaign_sync(account_id:int):
+    with account_sync_threads_lock:
+        if account_id in account_sync_threads: return False
+        account_sync_threads.add(account_id)
+    threading.Thread(target=run_account_campaign_sync_background,args=(account_id,),daemon=True,name=f"account-sync-{account_id}").start()
+    return True
 
 def sync_due_connected_accounts(session: Session) -> dict:
     """One-time, database-backed sync for accounts whose configured wait ended."""
@@ -173,13 +254,8 @@ def sync_due_connected_accounts(session: Session) -> dict:
         # OAuth reconnection resets due_at and is the only way it can return.
         if not account_is_eligible(account,now):
             continue
-        linked_count,created_count=sync_account_to_active_campaigns(session,account)
-        added+=linked_count; created+=created_count
-        account.campaign_sync_completed_at=now
-        audit(session,"ACCOUNT_SYNC_COMPLETED",f"Sincronização automática concluída: {added} vínculo(s) e {created} agendamento(s) futuro(s).",account_id=account.id)
-        completed+=1
-    if completed: commit_with_retry(session)
-    return {"completed":completed,"added":added,"created":created}
+        if queue_account_campaign_sync(account.id): completed+=1
+    return {"queued":completed,"added":added,"created":created}
 
 def as_local_datetime(value: str|None) -> datetime|None:
     if not value: return None
@@ -725,10 +801,9 @@ async def oauth_callback(code:str|None=None,state:str|None=None,error:str|None=N
         else: account.encrypted_token=meta.encrypt(token)
         account.username=profile.get("username",""); account.display_name=profile.get("name",account.username); account.profile_picture_url=profile.get("profile_picture_url",""); account.token_expires_at=expires; account.active=True; account.deleted_at=None; account.connected_at=datetime.utcnow(); account.last_verified_at=datetime.utcnow(); account.last_error=""
         days=schedule_account_campaign_sync(s,account)
-        added,created=sync_account_to_active_campaigns(s,account,not_before=account.campaign_sync_due_at)
-        account.campaign_sync_completed_at=datetime.utcnow()
-        audit(s,"ACCOUNT_RECONNECTED",f"Conta reconectada e validada via OAuth; {added} campanha(s) vinculada(s), {created} horário(s) futuro(s) criado(s) após o prazo de {days} dia(s).",account_id=account.id)
+        audit(s,"ACCOUNT_RECONNECTED",f"Conta reconectada e validada via OAuth; a preparação das campanhas ativas continuará em segundo plano após o prazo de {days} dia(s).",account_id=account.id)
         commit_with_retry(s)
+        queue_account_campaign_sync(account.id)
         return HTMLResponse("<script>window.opener&&window.opener.location.reload();window.close()</script><h2>Conta conectada com sucesso.</h2><p>Você já pode fechar esta janela e voltar ao Reels Manager.</p>")
     except HTTPException as e: return HTMLResponse(f"<h2>Não foi possível conectar a conta.</h2><p>{e.detail}</p>",e.status_code)
 def delete_account_safely(s: Session, item: InstagramAccount) -> None:
@@ -793,17 +868,25 @@ def dashboard(period:str="total",s:Session=Depends(db)):
     future=[post for post in posts if post.status in queued and post.scheduled_for>=now and (not cutoff or post.scheduled_for<=now+windows[period])]
     # "Pendentes" no painel não são publicações esperando horário. São apenas
     # slots que a geração ainda precisa processar e materializar no banco.
-    pending=0
+    pending=0; processing_messages=[]
     for campaign in s.scalars(select(Campaign).where(Campaign.status==CampaignStatus.PROCESSING)):
         linked_ids=list(s.scalars(select(CampaignAccount.account_id).where(CampaignAccount.campaign_id==campaign.id)))
         if not any(account_id in healthy_ids for account_id in linked_ids): continue
         progress=load_generation_progress(campaign.id) or {}
         pending+=max(0,int(progress.get("total",0))-int(progress.get("completed",0)))
+        if progress.get("message"): processing_messages.append(progress["message"])
+    # A entrada de contas também cria cópias processadas em segundo plano.
+    # Esses slots ainda não estão na agenda, logo pertencem a "Processando".
+    for account in healthy:
+        progress=load_account_sync_progress(account.id)
+        if progress.get("status")!="RUNNING": continue
+        pending+=max(0,int(progress.get("total",0))-int(progress.get("completed",0)))
+        if progress.get("message"): processing_messages.append(progress["message"])
     # Published is historical, like Insights. It intentionally includes Reels
     # from accounts that later became unavailable or were removed from the UI.
     published=[reel for reel in s.scalars(select(InstagramReel)) if reel.published_at and (not cutoff or cutoff<=reel.published_at<=now)]
     upcoming=sorted(future,key=lambda post:post.scheduled_for)[:5]
-    return {"period":period,"contas_aptas":len(healthy),"agendados":len(scheduled),"pendentes":pending,"publicados":len(published),"proximas":[{"id":post.id,"quando":post.scheduled_for,"legenda":post.caption} for post in upcoming]}
+    return {"period":period,"contas_aptas":len(healthy),"agendados":len(scheduled),"pendentes":pending,"processing_message":processing_messages[0] if processing_messages else "","publicados":len(published),"proximas":[{"id":post.id,"quando":post.scheduled_for,"legenda":post.caption} for post in upcoming]}
 
 @app.get("/api/insights/views-chart")
 def insight_views_chart(period:str="24h",start:str|None=None,end:str|None=None,s:Session=Depends(db)):
