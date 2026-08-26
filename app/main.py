@@ -955,6 +955,7 @@ def insight_reels(period:str="total",s:Session=Depends(db)):
     cutoff=datetime.utcnow()-windows[period] if period in windows else None
     winner_settings=saved_insight_winner_settings(s)
     rows=[]
+    now=datetime.utcnow()
     published_attempts={str(attempt.meta_media_id):attempt for attempt in s.scalars(select(PublicationAttempt).where(PublicationAttempt.status=="PUBLISHED",PublicationAttempt.meta_media_id!=""))}
     for reel in s.scalars(select(InstagramReel)).all():
         account=s.get(InstagramAccount,reel.account_id)
@@ -975,13 +976,14 @@ def insight_reels(period:str="total",s:Session=Depends(db)):
             original=s.get(Media,processed.original_media_id) if processed and processed.original_media_id else None
             if original and original.kind=="original":
                 library_media={"id":original.id,"name":original.original_name,"thumbnail_url":f"/api/media/{original.id}/thumbnail","video_url":f"/api/media/{original.id}/stream"}
-        rows.append({"id":reel.id,"meta_media_id":reel.meta_media_id,"conta":account.username if account else "conta removida","caption":reel.caption,"permalink":reel.permalink,"thumbnail_url":reel.thumbnail_url,"cached_thumbnail_url":f"/api/insights/reels/{reel.id}/thumbnail" if reel.cached_thumbnail_path else "","cached_video_url":f"/api/insights/reels/{reel.id}/video" if reel.cached_video_path and data_path(reel.cached_video_path).is_file() else "","library_media":library_media,"published_at":reel.published_at,"views":reel.views,"likes":reel.likes,"comments":reel.comments,"growth":reel.views,"likes_value":reel.likes,"comments_value":reel.comments,"has_baseline":True})
+        rows.append({"id":reel.id,"meta_media_id":reel.meta_media_id,"conta":account.username if account else "conta removida","caption":reel.caption,"permalink":reel.permalink,"thumbnail_url":reel.thumbnail_url,"cached_thumbnail_url":f"/api/insights/reels/{reel.id}/thumbnail" if reel.cached_thumbnail_path else "","cached_video_url":f"/api/insights/reels/{reel.id}/video" if reel.cached_video_path and data_path(reel.cached_video_path).is_file() else "","library_media":library_media,"published_at":reel.published_at,"views":reel.views,"likes":reel.likes,"comments":reel.comments,"growth":reel.views,"likes_value":reel.likes,"comments_value":reel.comments,"has_baseline":True,"preservado":not bool(account and account_is_eligible(account,now))})
     # Totals are over every Reel selected by the chosen publication period,
     # independently of the winner card cap/minimum.
-    summary={"views":sum(item["views"] for item in rows),"likes":sum(item["likes"] for item in rows),"comments":sum(item["comments"] for item in rows),"reels":len(rows),"measured_reels":len(rows),"awaiting_history":0}
+    summary={"views":sum(item["views"] for item in rows),"likes":sum(item["likes"] for item in rows),"comments":sum(item["comments"] for item in rows),"reels":len(rows),"measured_reels":len(rows),"awaiting_history":0,"reels_preservados":sum(1 for item in rows if item["preservado"])}
     ranked=[item for item in rows if item["views"]>=winner_settings["minimum_views"]]
     ranked.sort(key=lambda item:(item["growth"],item["views"]),reverse=True)
-    return {"period":period,"reels":ranked[:winner_settings["limit"]],"summary":summary,"settings":winner_settings,"accounts":[{"id":account.id,"username":account.username,"error":account.last_insights_error,"synced_at":max([reel.synced_at for reel in s.scalars(select(InstagramReel).where(InstagramReel.account_id==account.id))],default=None)} for account in s.scalars(select(InstagramAccount).where(InstagramAccount.deleted_at.is_(None)))]}
+    preserved=[item for item in ranked if item["preservado"]]
+    return {"period":period,"reels":ranked[:winner_settings["limit"]],"reels_preservados":preserved,"summary":summary,"settings":winner_settings,"accounts":[{"id":account.id,"username":account.username,"error":account.last_insights_error,"synced_at":max([reel.synced_at for reel in s.scalars(select(InstagramReel).where(InstagramReel.account_id==account.id))],default=None)} for account in s.scalars(select(InstagramAccount).where(InstagramAccount.deleted_at.is_(None)))]}
 @app.post("/api/insights/sync")
 def request_insight_sync():
     threading.Thread(target=lambda: asyncio.run(run_insights_sync_if_due(True)),daemon=True,name="instagram-insights-sync").start()

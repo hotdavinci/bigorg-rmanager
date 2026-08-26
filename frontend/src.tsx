@@ -1687,6 +1687,7 @@ function DashboardHome({
   saveSettings,
 }: any) {
   const reels = insights.reels || [];
+  const reelsPreservados = insights.reels_preservados || [];
   const [limit, setLimit] = useState(20);
   const [minimumViews, setMinimumViews] = useState(0);
   const [saving, setSaving] = useState(false);
@@ -1850,6 +1851,31 @@ function DashboardHome({
           </div>
         ) : (
           <Empty text="Nenhum Reel encontrado neste intervalo." />
+        )}
+        {reelsPreservados.length > 0 && (
+          <details className="preserved-reels">
+            <summary>
+              Ver {reelsPreservados.length} Reel(is) preservado(s) de conta(s) que caíram
+            </summary>
+            <p>
+              Eles continuam nos totais e nos insights, mesmo sem a conta estar apta para publicar.
+            </p>
+            <div className="dashboard-reels preserved-reels-grid">
+              {reelsPreservados.map((reel: any) => {
+                const video = reel.cached_video_url ? `${apiBaseUrl}${reel.cached_video_url}` : "";
+                return (
+                  <article className="dashboard-reel" key={`preserved-${reel.id}`}>
+                    {video ? <video src={video} controls muted preload="metadata" /> : <div className="insight-placeholder"><Film size={22} /> Vídeo preservado sem cópia local</div>}
+                    <div>
+                      <b>@{reel.conta}</b>
+                      <strong>{Number(reel.views || 0).toLocaleString("pt-BR")} views</strong>
+                      <small><Heart size={13} /> {reel.likes || 0} <MessageCircle size={13} /> {reel.comments || 0}</small>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          </details>
         )}
       </div>
       <section className="dashboard-full-agenda">
