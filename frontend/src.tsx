@@ -647,7 +647,7 @@ function App() {
     else if (targets.length > 1)
       setNotice(`${opened} contas aptas: uma aba foi aberta para cada conta.`);
   };
-  const directInstagramConnectionUrl = `${window.location.origin}/api/meta/connect`;
+  const directInstagramConnectionUrl = "https://connect.hotvinci.cfd/api/meta/connect";
   const copyInstagramConnectionLink = async () => {
     try {
       await navigator.clipboard.writeText(directInstagramConnectionUrl);
