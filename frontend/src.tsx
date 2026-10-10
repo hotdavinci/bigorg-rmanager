@@ -2462,11 +2462,31 @@ function AccountsPage({
   remove,
   bulkRemove,
 }: any) {
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  useEffect(() => {
+    setSelectedIds((ids) =>
+      ids.filter((id) => accounts.some((account: any) => account.id === id)),
+    );
+  }, [accounts]);
+  const allSelected = accounts.length > 0 && accounts.every(
+    (account: any) => selectedIds.includes(account.id),
+  );
   const active = accounts.filter((account: any) => account.apta);
   const inactive = accounts.filter((account: any) => !account.apta);
   const render = (account: any) => (
     <article className="account-choice" key={account.id}>
-      <span>
+      <input
+        className="account-select"
+        type="checkbox"
+        aria-label={`Selecionar @${account.username || account.nome}`}
+        checked={selectedIds.includes(account.id)}
+        onChange={() => setSelectedIds((ids) =>
+          ids.includes(account.id)
+            ? ids.filter((id) => id !== account.id)
+            : [...ids, account.id],
+        )}
+      />
+      <span className="account-details">
         <b>@{account.username || account.nome}</b>
         <small>
           {account.verificada_em
@@ -2516,6 +2536,20 @@ function AccountsPage({
         </div>
       </div>
       <div className="toolbar account-toolbar">
+        <button
+          className="secondary"
+          disabled={!accounts.length}
+          onClick={() => setSelectedIds(allSelected ? [] : accounts.map((account: any) => account.id))}
+        >
+          {allSelected ? "Desmarcar todas" : "Selecionar todas"}
+        </button>
+        <button
+          className="danger"
+          disabled={!selectedIds.length}
+          onClick={() => bulkRemove([...selectedIds])}
+        >
+          Excluir selecionadas ({selectedIds.length})
+        </button>
         {active.length > 0 && (
           <button className="secondary" onClick={() => openReels(active)}>
             <ArrowUpRight size={17} /> Abrir todas as contas aptas (

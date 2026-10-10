@@ -6,4 +6,5 @@
 .account-choice:hover{background:#292a3d;border-color:#6651bc}
 .account-choice>span:first-child{flex:1}.account-choice b{display:block}.account-choice small{display:block;color:#aaaabe;margin-top:4px}
 .account-choice .danger{padding:8px 11px}
+.account-choice .account-details{flex:1;min-width:0}.account-choice .account-select{flex:0 0 auto;width:18px;height:18px;margin:0;cursor:pointer;accent-color:#9575ed}
 .account-open{border:1px solid #6651bc;background:#2c2946;color:#d9d1ff}.account-error-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:28px}.account-error-heading .account-section-title{margin:0}
