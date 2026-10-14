@@ -11,7 +11,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select, delete, func, text, update, or_
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import OperationalError
@@ -22,6 +22,7 @@ from .services import dirs, copy_media, process, process_slot, process_slots_bat
 from . import meta
 from .tunnel import tunnel
 from .media_gateway import media_app
+from .daily_schedule import daily_quantity, daily_ranges, utc_deadline_local
 import uvicorn
 
 # A entrada de uma conta pode criar muitas cópias processadas para campanhas
@@ -74,6 +75,9 @@ def cancel_account_from_active_campaigns(session: Session, account: InstagramAcc
     return cancelled
 
 def parse_intervals(values: list[str]):
+    quantity=daily_quantity(values)
+    if quantity is not None:
+        return [(i*1440//quantity,(i+1)*1440//quantity-1) for i in range(quantity)]
     ranges=[]
     for item in values:
         left,right=item.split("-"); start=datetime.strptime(left.strip(),"%H:%M").time(); end=datetime.strptime(right.strip(),"%H:%M").time()
@@ -83,6 +87,11 @@ def parse_intervals(values: list[str]):
         if high<low: high+=24*60
         ranges.append((low,high))
     return ranges
+
+def ranges_for_day(values: list[str], current: date, now: datetime, not_before: datetime|None=None):
+    quantity=daily_quantity(values)
+    return daily_ranges(quantity,current,now,not_before) if quantity is not None else parse_intervals(values)
+
 
 def _clone_processed_for_schedule(session: Session, campaign_id: int, original_media_id: int, seed_media: Media, account_id: int, position: int) -> Media:
     source=data_path(seed_media.relative_path)
@@ -105,7 +114,7 @@ def materialize_missing_schedule_for_account(session: Session, campaign: Campaig
         audit(session,"SCHEDULE_SYNC_FAILED","Regras de horário inválidas; nenhum agendamento foi criado.",campaign.id,account.id); return 0
     sources=list(session.scalars(select(CampaignSourceMedia.media_id).where(CampaignSourceMedia.campaign_id==campaign.id)))
     if not sources: return 0
-    now=datetime.now(); captions=[]
+    now=datetime.now(); not_before=utc_deadline_local(not_before); captions=[]
     if campaign.caption_list_id:
         caption_list=session.get(CaptionList,campaign.caption_list_id)
         if caption_list:
@@ -116,8 +125,8 @@ def materialize_missing_schedule_for_account(session: Session, campaign: Campaig
     created=0
     for day_offset in range(rule.days):
         current=start_date+timedelta(days=day_offset)
-        for range_index,(low,high) in enumerate(ranges):
-            position=day_offset*1000+range_index
+        for range_index,(low,high) in enumerate(ranges_for_day(rule.intervals.split(","),current,now,not_before)):
+            position=day_offset*(1440 if daily_quantity(rule.intervals.split(",")) else 1000)+range_index
             if position in existing_positions: continue
             # Stable randomness means a restart calculates the same occurrence.
             rng=random.Random(f"campaign:{campaign.id}:account:{account.id}:slot:{position}")
@@ -202,9 +211,10 @@ def estimated_account_sync_slots(session:Session, account:InstagramAccount) -> i
         for offset in range(rule.days):
             current=start+timedelta(days=offset)
             if current<now.date(): continue
-            for low,high in ranges:
+            deadline=utc_deadline_local(account.campaign_sync_due_at)
+            for low,high in ranges_for_day(rule.intervals.split(","),current,now,deadline):
                 when=datetime.combine(current,time())+timedelta(minutes=low)
-                if when>now and (not account.campaign_sync_due_at or when>=account.campaign_sync_due_at): total+=1
+                if when>now and (not deadline or when>=deadline): total+=1
     return total
 
 def run_account_campaign_sync_background(account_id:int):
@@ -644,11 +654,24 @@ app.add_middleware(
 )
 BUILD_ID = "oauth-instagram-login-20260731-2"
 class CampaignIn(BaseModel): name:str; description:str=""; timezone:str="America/Sao_Paulo"; script_id:int|None=None
-class CampaignSetupIn(BaseModel): account_ids:list[int]=[]; source_ids:list[int]; script_ids:list[int]; start_date:date; days:int; intervals:list[str]; strategy:str="sequential"; cover_path:str=""; caption_list_id:int|None=None; caption_text:str=""
+class QuantityScheduleIn(BaseModel):
+    intervals:list[str]=[]
+    reels_per_day:int|None=Field(default=None,ge=1,le=1440)
+
+    @model_validator(mode="after")
+    def normalize_quantity(self):
+        if self.reels_per_day is not None:
+            self.intervals=[f"daily:{self.reels_per_day}"]
+        elif daily_quantity(self.intervals) is not None:
+            self.reels_per_day=daily_quantity(self.intervals)
+        return self
+
+
+class CampaignSetupIn(QuantityScheduleIn): account_ids:list[int]=[]; source_ids:list[int]; script_ids:list[int]; start_date:date; days:int; strategy:str="sequential"; cover_path:str=""; caption_list_id:int|None=None; caption_text:str=""
 class ProcessIn(BaseModel): source_ids:list[int]
 class ScheduleIn(BaseModel): account_id:int; processed_media_id:int; caption:str=""; scheduled_for:datetime; position:int=0
-class GenerateScheduleIn(BaseModel): start_date:date; days:int; intervals:list[str]; strategy:str="sequential"
-class CampaignDefaultsIn(BaseModel): intervals:list[str]=["11:00-13:00"]; days:int=7; strategy:str="sequential"; script_ids:list[int]=[]; cover_path:str=""; caption_list_id:int|None=None; caption_text:str=""
+class GenerateScheduleIn(QuantityScheduleIn): start_date:date; days:int; strategy:str="sequential"
+class CampaignDefaultsIn(QuantityScheduleIn): intervals:list[str]=["11:00-13:00"]; days:int=7; strategy:str="sequential"; script_ids:list[int]=[]; cover_path:str=""; caption_list_id:int|None=None; caption_text:str=""
 class LoginIn(BaseModel): email:str; password:str
 
 def progress_file(campaign_id:int) -> Path:
@@ -1242,7 +1265,7 @@ def campaigns(s:Session=Depends(db)):
     result=[]
     for x in s.scalars(select(Campaign)):
         rule=s.scalar(select(CampaignScheduleRule).where(CampaignScheduleRule.campaign_id==x.id))
-        result.append({"id":x.id,"nome":x.name,"status":x.status,"progress":load_generation_progress(x.id),"cover_path":x.cover_path,"caption_list_id":x.caption_list_id,"caption_text":x.caption_text,"script_ids":list(s.scalars(select(CampaignScript.script_id).where(CampaignScript.campaign_id==x.id).order_by(CampaignScript.position))),"account_ids":list(s.scalars(select(CampaignAccount.account_id).where(CampaignAccount.campaign_id==x.id))),"source_ids":list(s.scalars(select(CampaignSourceMedia.media_id).where(CampaignSourceMedia.campaign_id==x.id))),"schedule":{"start_date":rule.start_date,"days":rule.days,"intervals":rule.intervals.split(","),"strategy":rule.strategy} if rule else None})
+        result.append({"id":x.id,"nome":x.name,"status":x.status,"progress":load_generation_progress(x.id),"cover_path":x.cover_path,"caption_list_id":x.caption_list_id,"caption_text":x.caption_text,"script_ids":list(s.scalars(select(CampaignScript.script_id).where(CampaignScript.campaign_id==x.id).order_by(CampaignScript.position))),"account_ids":list(s.scalars(select(CampaignAccount.account_id).where(CampaignAccount.campaign_id==x.id))),"source_ids":list(s.scalars(select(CampaignSourceMedia.media_id).where(CampaignSourceMedia.campaign_id==x.id))),"schedule":{"start_date":rule.start_date,"days":rule.days,"intervals":rule.intervals.split(","),"reels_per_day":daily_quantity(rule.intervals.split(",")),"strategy":rule.strategy} if rule else None})
     return result
 @app.get("/api/campaigns/{campaign_id}/progress")
 def campaign_progress(campaign_id:int,s:Session=Depends(db)):
@@ -1319,12 +1342,12 @@ def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(
     accounts=list(s.scalars(select(CampaignAccount.account_id).where(CampaignAccount.campaign_id==campaign_id)))
     # New accounts are linked right away, while this timestamp protects the
     # beginning of their schedule during the configured onboarding delay.
-    account_not_before={account_id:(s.get(InstagramAccount,account_id).campaign_sync_due_at if s.get(InstagramAccount,account_id) else None) for account_id in accounts}
+    account_not_before={account_id:(utc_deadline_local(s.get(InstagramAccount,account_id).campaign_sync_due_at) if s.get(InstagramAccount,account_id) else None) for account_id in accounts}
     sources=list(s.scalars(select(CampaignSourceMedia.media_id).where(CampaignSourceMedia.campaign_id==campaign_id)))
     caption_items=json.loads(s.get(CaptionList,c.caption_list_id).items_json) if c.caption_list_id and s.get(CaptionList,c.caption_list_id) else []
     if not accounts or not sources: raise HTTPException(422,"Selecione ao menos uma conta e uma mídia original")
-    ranges=[]
-    for item in body.intervals:
+    ranges=parse_intervals(body.intervals) if body.reels_per_day else []
+    for item in ([] if body.reels_per_day else body.intervals):
         # Aceita texto colado com rótulos, por exemplo "9h: 08:30-09:00",
         # mas só usa as faixas reais de horário encontradas nele.
         matches=re.findall(r"(\d{2}:\d{2})\s*-\s*(\d{2}:\d{2})",item)
@@ -1349,28 +1372,30 @@ def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(
     for day_offset in range(body.days):
         current=body.start_date+timedelta(days=day_offset)
         if current<date.today(): continue
-        for low,high in ranges:
-            for account_id in accounts:
-                protected_until=account_not_before.get(account_id)
-                delayed_low=low
-                if protected_until:
-                    if current<protected_until.date():
+        occurrences=([(account_id,low,high) for account_id in accounts
+            for low,high in ranges_for_day(body.intervals,current,datetime.now(),account_not_before.get(account_id))]
+            if body.reels_per_day else [(account_id,low,high) for low,high in ranges for account_id in accounts])
+        for account_id,low,high in occurrences:
+            protected_until=account_not_before.get(account_id)
+            delayed_low=low
+            if protected_until:
+                if current<protected_until.date():
+                    continue
+                if current==protected_until.date():
+                    delayed_low=max(low,protected_until.hour*60+protected_until.minute)
+                    if delayed_low>high:
                         continue
-                    if current==protected_until.date():
-                        delayed_low=max(low,protected_until.hour*60+protected_until.minute)
-                        if delayed_low>high:
-                            continue
-                if current==date.today():
-                    earliest=datetime.now()+timedelta(minutes=5)
-                    if high < earliest.hour*60+earliest.minute: continue
-                source_id=random.choice(sources) if body.strategy=="random" else ordered[index%len(ordered)]
-                index+=1
-                if c.caption_text: caption=c.caption_text
-                elif caption_items:
-                    choices=[text for text in caption_items if text!=previous_caption_by_account.get(account_id)] or caption_items
-                    caption=random.choice(choices); previous_caption_by_account[account_id]=caption
-                else: caption=""
-                jobs.append({"slot_key":f"slot-{uuid.uuid4().hex}","source_id":source_id,"account_id":account_id,"current":current,"low":delayed_low,"high":high,"caption":caption})
+            if current==date.today():
+                earliest=datetime.now()+timedelta(minutes=5)
+                if high < earliest.hour*60+earliest.minute: continue
+            source_id=random.choice(sources) if body.strategy=="random" else ordered[index%len(ordered)]
+            index+=1
+            if c.caption_text: caption=c.caption_text
+            elif caption_items:
+                choices=[text for text in caption_items if text!=previous_caption_by_account.get(account_id)] or caption_items
+                caption=random.choice(choices); previous_caption_by_account[account_id]=caption
+            else: caption=""
+            jobs.append({"slot_key":f"slot-{uuid.uuid4().hex}","source_id":source_id,"account_id":account_id,"current":current,"low":delayed_low,"high":high,"caption":caption})
     batch_size=max(1,min(settings.processing_batch_size,50))
     save_generation_progress(campaign_id,status="RUNNING",total=len(jobs),completed=0,scheduled=0,failed=0,batch_size=batch_size,message="Preparando os lotes de vídeos...",started_at=datetime.utcnow().isoformat())
     scheduled=0
@@ -1399,7 +1424,11 @@ def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(
                     if cover_data: data_path(cover_data[0]).unlink(missing_ok=True)
                     continue
                 effective_low=job["low"]
-                if job["current"]==date.today():
+                if body.reels_per_day:
+                    earliest=datetime.now()+timedelta(minutes=5)
+                    seconds=(earliest-datetime.combine(job["current"],time())).total_seconds()
+                    effective_low=max(effective_low,int(-(-seconds//60)))
+                elif job["current"]==date.today():
                     earliest=datetime.now()+timedelta(minutes=5)
                     effective_low=max(job["low"],earliest.hour*60+earliest.minute)
                 if effective_low>job["high"]:
@@ -1428,7 +1457,7 @@ def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(
         if scheduled==0:
             c.status=CampaignStatus.PROCESSING_FAILED
             commit_with_retry(s)
-            save_generation_progress(campaign_id,status="FAILED",total=len(jobs),completed=len(jobs),scheduled=0,failed=0,batch_size=batch_size,message="Nenhum horário futuro disponível para agendar. Ajuste a data inicial ou os intervalos.",finished_at=datetime.utcnow().isoformat())
+            save_generation_progress(campaign_id,status="FAILED",total=len(jobs),completed=len(jobs),scheduled=0,failed=0,batch_size=batch_size,message="Nenhum horário futuro disponível para agendar. Confira a data inicial e a liberação das contas.",finished_at=datetime.utcnow().isoformat())
             return {"count":0,"status":c.status}
         c.status=CampaignStatus.ACTIVE; commit_with_retry(s)
         save_generation_progress(campaign_id,status="COMPLETED",total=len(jobs),completed=len(jobs),scheduled=scheduled,failed=0,batch_size=batch_size,message=f"Concluído: {scheduled} posts agendados.",finished_at=datetime.utcnow().isoformat())
@@ -1488,7 +1517,7 @@ def start_generation(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(d
     account_count=s.scalar(select(func.count()).select_from(CampaignAccount).where(CampaignAccount.campaign_id==campaign_id)) or 0
     campaign.status=CampaignStatus.PROCESSING; s.commit()
     threading.Thread(target=run_schedule_background,args=(campaign_id,body),daemon=True,name=f"schedule-{campaign_id}").start()
-    return {"accepted":True,"status":CampaignStatus.PROCESSING,"count":account_count*body.days*len(body.intervals)}
+    return {"accepted":True,"status":CampaignStatus.PROCESSING,"count":account_count*body.days*(body.reels_per_day or len(body.intervals))}
 @app.post("/api/campaigns/{campaign_id}/activate")
 def activate(campaign_id:int,s:Session=Depends(db)):
     c=s.get(Campaign,campaign_id)

@@ -86,14 +86,14 @@ const statusLabel = (status: string) =>
 const defaultCampaignName = (
   start: string,
   days: number,
-  intervals: string[],
+  reelsPerDay: number,
 ) => {
   const first = new Date(`${start}T12:00:00`);
   const last = new Date(first);
   last.setDate(last.getDate() + Math.max(1, days) - 1);
   const fmt = (value: Date) =>
     `${String(value.getDate()).padStart(2, "0")}/${String(value.getMonth() + 1).padStart(2, "0")}`;
-  return `${fmt(first)}-${fmt(last)} · ${intervals.length} mídia(s)/dia`;
+  return `${fmt(first)}-${fmt(last)} · ${reelsPerDay} Reels/dia por conta`;
 };
 const campaignEndDate = (start: string, days: number) => {
   const end = new Date(`${start}T12:00:00`);
@@ -169,14 +169,12 @@ function App() {
   const [selectedMedia, setSelectedMedia] = useState<number[]>([]);
   const [scheduleStart, setScheduleStart] = useState(localDate());
   const [scheduleDays, setScheduleDays] = useState("7");
-  const [scheduleIntervals, setScheduleIntervals] = useState("11:00-13:00");
+
   const [scheduleStrategy, setScheduleStrategy] = useState("sequential");
-  const [scheduleRanges, setScheduleRanges] = useState<string[]>([
-    "11:00-13:00",
-  ]);
+  const [reelsPerDay, setReelsPerDay] = useState("1");
   const setCampaignOpen = (open: boolean) => {
     if (open) {
-      const ranges = defaults.intervals || ["11:00-13:00"];
+      const quantity = Number(defaults.reels_per_day || defaults.intervals?.length || 1);
       const models = defaults.script_ids || [];
       const days = Number(defaults.days || 7);
       const start = localDate();
@@ -184,14 +182,14 @@ function App() {
       setSetupMedia([]);
       setSetupScripts(models);
       setScheduleStart(start);
-      setScheduleRanges(ranges);
+      setReelsPerDay(String(quantity));
       setScheduleDays(String(days));
       setScheduleStrategy(defaults.strategy || "sequential");
       setCoverPath(defaults.cover_path || "");
       setCoverName(defaults.cover_path ? "Capa padrão selecionada" : "");
       setCaptionListId(defaults.caption_list_id || null);
       setCaptionText(defaults.caption_text || "");
-      setCampaignName(defaultCampaignName(start, days, ranges));
+      setCampaignName(defaultCampaignName(start, days, quantity));
       setCampaignDescription(
         "Usará automaticamente todas as contas saudáveis e aptas a publicar.",
       );
@@ -311,10 +309,10 @@ function App() {
         defaultCampaignName(
           scheduleStart,
           Number(scheduleDays) || 1,
-          scheduleRanges,
+          Number(reelsPerDay) || 1,
         ),
       );
-  }, [campaignOpen, scheduleStart, scheduleDays, scheduleRanges]);
+  }, [campaignOpen, scheduleStart, scheduleDays, reelsPerDay]);
   const importMedia = async (event: React.ChangeEvent<HTMLInputElement>) => {
     if (!event.target.files?.length) return;
     const data = new FormData();
@@ -403,10 +401,10 @@ function App() {
       !name ||
       !setupMedia.length ||
       !setupScripts.length ||
-      !scheduleRanges.length
+      (!Number.isInteger(Number(reelsPerDay)) || Number(reelsPerDay) < 1 || Number(reelsPerDay) > 1440)
     ) {
       setNotice(
-        "Preencha o nome e selecione mídias, scripts e ao menos um intervalo.",
+        "Preencha o nome e selecione mídias, scripts e uma quantidade válida de Reels.",
       );
       return;
     }
@@ -431,7 +429,7 @@ function App() {
           script_ids: setupScripts,
           start_date: scheduleStart,
           days: Number(scheduleDays),
-          intervals: scheduleRanges,
+          reels_per_day: Number(reelsPerDay),
           strategy: scheduleStrategy,
           cover_path: coverPath,
           caption_list_id: captionListId,
@@ -446,7 +444,7 @@ function App() {
           body: JSON.stringify({
             start_date: scheduleStart,
             days: Number(scheduleDays),
-            intervals: scheduleRanges,
+            reels_per_day: Number(reelsPerDay),
             strategy: scheduleStrategy,
           }),
         },
@@ -483,7 +481,7 @@ function App() {
     setCaptionText(campaign.caption_text || "");
     setScheduleStart(campaign.schedule?.start_date || localDate());
     setScheduleDays(String(campaign.schedule?.days || 7));
-    setScheduleRanges(campaign.schedule?.intervals || ["11:00-13:00"]);
+    setReelsPerDay(String(campaign.schedule?.reels_per_day || campaign.schedule?.intervals?.length || 1));
     setScheduleStrategy(campaign.schedule?.strategy || "sequential");
   };
   const toggle = (
@@ -499,15 +497,15 @@ function App() {
   const saveSetup = async (event: FormEvent) => {
     event.preventDefault();
     if (!setupCampaign) return;
-    if (!setupMedia.length || !setupScripts.length || !scheduleRanges.length) {
-      setNotice("Selecione mídias, scripts e ao menos um intervalo.");
+    if (!setupMedia.length || !setupScripts.length || (!Number.isInteger(Number(reelsPerDay)) || Number(reelsPerDay) < 1 || Number(reelsPerDay) > 1440)) {
+      setNotice("Selecione mídias, scripts e uma quantidade válida de Reels.");
       return;
     }
     try {
       const body = {
         start_date: scheduleStart,
         days: Number(scheduleDays),
-        intervals: scheduleRanges,
+        reels_per_day: Number(reelsPerDay),
         strategy: scheduleStrategy,
       };
       await api(`/campaigns/${setupCampaign.id}/setup`, {
@@ -683,7 +681,7 @@ function App() {
     setSetupAccounts([]);
     setSetupMedia([]);
     setSetupScripts(defaults.script_ids || []);
-    setScheduleRanges(defaults.intervals || ["11:00-13:00"]);
+    setReelsPerDay(String(defaults.reels_per_day || defaults.intervals?.length || 1));
     setScheduleDays(String(defaults.days || 7));
     setScheduleStrategy(defaults.strategy || "sequential");
     setCoverPath(defaults.cover_path || "");
@@ -695,9 +693,7 @@ function App() {
   const saveDefaults = async () => {
     try {
       const payload = {
-        intervals: (defaults.intervals || [])
-          .map((value: string) => value.trim())
-          .filter(Boolean),
+        reels_per_day: Number(defaults.reels_per_day || defaults.intervals?.length || 1),
         days: Number(defaults.days || 7),
         strategy: defaults.strategy || "sequential",
         script_ids: defaults.script_ids || [],
@@ -705,8 +701,8 @@ function App() {
         caption_list_id: defaults.caption_list_id || null,
         caption_text: defaults.caption_text || "",
       };
-      if (!payload.intervals.length)
-        throw new Error("Informe ao menos um intervalo padrão.");
+      if (!Number.isInteger(payload.reels_per_day) || payload.reels_per_day < 1 || payload.reels_per_day > 1440)
+        throw new Error("Informe uma quantidade válida de Reels padrão.");
       const saved = await api("/campaign-defaults", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -762,10 +758,7 @@ function App() {
           body: JSON.stringify({
             start_date: scheduleStart,
             days: Number(scheduleDays),
-            intervals: scheduleIntervals
-              .split(",")
-              .map((x) => x.trim())
-              .filter(Boolean),
+            reels_per_day: Number(reelsPerDay),
             strategy: scheduleStrategy,
           }),
         },
@@ -862,11 +855,11 @@ function App() {
         campaign={scheduleModal}
         start={scheduleStart}
         days={scheduleDays}
-        intervals={scheduleIntervals}
+        reelsPerDay={reelsPerDay}
         strategy={scheduleStrategy}
         setStart={setScheduleStart}
         setDays={setScheduleDays}
-        setIntervals={setScheduleIntervals}
+        setReelsPerDay={setReelsPerDay}
         setStrategy={setScheduleStrategy}
         cancel={() => setScheduleModal(null)}
         submit={scheduleCampaign}
@@ -1244,20 +1237,12 @@ function App() {
                   </select>
                 </label>
                 <label className="full-width">
-                  Intervalos padrão <small>separe por vírgula</small>
-                  <input
-                    value={(defaults.intervals || []).join(", ")}
-                    placeholder="11:00-13:00, 18:00-21:00"
-                    onChange={(e) =>
-                      setDefaults({
-                        ...defaults,
-                        intervals: e.target.value
-                          .split(",")
-                          .map((x) => x.trim())
-                          .filter(Boolean),
-                      })
-                    }
+                  Reels por dia e por conta
+                  <input type="number" min="1" max="1440" required
+                    value={defaults.reels_per_day ?? defaults.intervals?.length ?? 1}
+                    onChange={(e) => setDefaults({ ...defaults, reels_per_day: e.target.value })}
                   />
+                  <small>Distribuição automática durante as 24 horas.</small>
                 </label>
                 <label>
                   Lista JSON padrão
@@ -1517,8 +1502,8 @@ function App() {
           setStart={setScheduleStart}
           days={scheduleDays}
           setDays={setScheduleDays}
-          ranges={scheduleRanges}
-          setRanges={setScheduleRanges}
+          reelsPerDay={reelsPerDay}
+          setReelsPerDay={setReelsPerDay}
           strategy={scheduleStrategy}
           setStrategy={setScheduleStrategy}
           coverPath={coverPath}
@@ -1556,8 +1541,8 @@ function App() {
           setStart={setScheduleStart}
           days={scheduleDays}
           setDays={setScheduleDays}
-          ranges={scheduleRanges}
-          setRanges={setScheduleRanges}
+          reelsPerDay={reelsPerDay}
+          setReelsPerDay={setReelsPerDay}
           strategy={scheduleStrategy}
           setStrategy={setScheduleStrategy}
           coverPath={coverPath}
@@ -2592,8 +2577,6 @@ function CampaignDialog(p: any) {
       items.includes(id) ? items.filter((x) => x !== id) : [...items, id],
     );
   const originals = p.media.filter((m: any) => m.tipo === "original");
-  const updateRange = (i: number, value: string) =>
-    p.setRanges(p.ranges.map((x: string, n: number) => (n === i ? value : x)));
   return (
     <div className="modal-backdrop">
       <form className="modal campaign-wide" onSubmit={p.submit}>
@@ -2770,38 +2753,13 @@ function CampaignDialog(p: any) {
               </select>
             </label>
             <label>
-              Intervalos{" "}
-              <small>
-                cada intervalo equivale a um post por dia e por conta
-              </small>
+              Reels por dia e por conta
+              <input type="number" min="1" max="1440" required
+                value={p.reelsPerDay}
+                onChange={(e: any) => p.setReelsPerDay(e.target.value)}
+              />
+              <small>Distribuídos automaticamente nas 24 horas. No primeiro dia, usamos o tempo restante após a preparação e a liberação da conta.</small>
             </label>
-            {p.ranges.map((range: string, i: number) => (
-              <div className="range-row" key={i}>
-                <input
-                  value={range}
-                  onChange={(e: any) => updateRange(i, e.target.value)}
-                  placeholder="11:00-13:00"
-                />
-                <button
-                  type="button"
-                  className="danger"
-                  onClick={() =>
-                    p.setRanges(
-                      p.ranges.filter((_: string, n: number) => n !== i),
-                    )
-                  }
-                >
-                  Remover
-                </button>
-              </div>
-            ))}
-            <button
-              type="button"
-              className="secondary"
-              onClick={() => p.setRanges([...p.ranges, "18:00-21:00"])}
-            >
-              + Adicionar intervalo
-            </button>
           </section>
         </div>
         <div className="modal-actions">
@@ -2818,11 +2776,11 @@ function ScheduleDialog({
   campaign,
   start,
   days,
-  intervals,
+  reelsPerDay,
   strategy,
   setStart,
   setDays,
-  setIntervals,
+  setReelsPerDay,
   setStrategy,
   cancel,
   submit,
@@ -2858,11 +2816,10 @@ function ScheduleDialog({
           </label>
         </div>
         <label>
-          Intervalos <small>Ex.: 11:00-13:00, 18:00-21:00</small>
-          <input
-            value={intervals}
-            onChange={(e) => setIntervals(e.target.value)}
-          />
+          Reels por dia e por conta
+          <input type="number" min="1" max="1440" required value={reelsPerDay}
+            onChange={(e) => setReelsPerDay(e.target.value)} />
+          <small>Distribuição automática durante as 24 horas.</small>
         </label>
         <label>
           Escolha das mídias

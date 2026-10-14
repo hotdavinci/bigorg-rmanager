@@ -3,6 +3,7 @@ import unittest
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
@@ -40,14 +41,16 @@ class CampaignAccountSyncTests(unittest.TestCase):
         session.commit()
         return campaign,account
 
-    def test_due_healthy_account_is_added_to_active_campaign_once(self):
+    def test_due_healthy_account_is_queued_without_running_worker_in_request(self):
         with self.Session() as session:
             campaign,account=self.seed(session)
             account.campaign_sync_due_at=datetime.utcnow()-timedelta(seconds=1)
             session.commit()
-            main.sync_due_connected_accounts(session)
-            self.assertEqual(session.scalar(select(CampaignAccount.account_id).where(CampaignAccount.campaign_id==campaign.id)),account.id)
-            self.assertIsNotNone(account.campaign_sync_completed_at)
+            with patch.object(main,'queue_account_campaign_sync',return_value=True) as queue:
+                result=main.sync_due_connected_accounts(session)
+            queue.assert_called_once_with(account.id)
+            self.assertEqual(result['queued'],1)
+            self.assertIsNone(account.campaign_sync_completed_at)
 
     def test_past_slots_are_never_created(self):
         with self.Session() as session:
