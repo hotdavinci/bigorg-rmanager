@@ -23,6 +23,7 @@ from . import meta
 from .tunnel import tunnel
 from .media_gateway import media_app
 from .daily_schedule import daily_quantity, daily_ranges, utc_deadline_local
+from .insight_reset import include_after_reset
 import uvicorn
 
 # A entrada de uma conta pode criar muitas cópias processadas para campanhas
@@ -366,12 +367,15 @@ def archive_published_reel_video(session: Session, account_id: int, meta_media_i
 
 async def sync_reel_insights(session: Session) -> dict:
     synced=unsupported=0; video_candidates=[]
+    reset=session.get(ApplicationSetting,"insights_reset_at")
+    reset_at=reset.value if reset else None
     # Insights are independent from publishing health. An account may publish
     # normally while its token does not have the insights scope yet.
     for account in session.scalars(select(InstagramAccount).where(InstagramAccount.active==True)):
         try:
             items=await meta.reels_with_views(account.meta_account_id,meta.decrypt(account.encrypted_token),settings.insights_reels_limit)
             for item in items:
+                if not include_after_reset(item.get("timestamp"),reset_at): continue
                 reel=session.scalar(select(InstagramReel).where(InstagramReel.account_id==account.id,InstagramReel.meta_media_id==str(item["id"])))
                 if not reel:
                     reel=InstagramReel(account_id=account.id,meta_media_id=str(item["id"])); session.add(reel); session.flush()
