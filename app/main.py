@@ -107,10 +107,12 @@ def _clone_processed_for_schedule(session: Session, campaign_id: int, original_m
     return output
 
 def materialize_missing_schedule_for_account(session: Session, campaign: Campaign, account: InstagramAccount, not_before: datetime|None=None) -> int:
-    """Adds only future, missing slots. It never edits an existing publication."""
+    """Process fresh original video/cover for every missing future occurrence."""
     rule=session.scalar(select(CampaignScheduleRule).where(CampaignScheduleRule.campaign_id==campaign.id))
     if not rule: return 0
-    try: ranges=parse_intervals([x.strip() for x in rule.intervals.split(",") if x.strip()]); start_date=date.fromisoformat(rule.start_date)
+    try:
+        values=[x.strip() for x in rule.intervals.split(",") if x.strip()]
+        parse_intervals(values); start_date=date.fromisoformat(rule.start_date)
     except (ValueError, TypeError):
         audit(session,"SCHEDULE_SYNC_FAILED","Regras de horário inválidas; nenhum agendamento foi criado.",campaign.id,account.id); return 0
     sources=list(session.scalars(select(CampaignSourceMedia.media_id).where(CampaignSourceMedia.campaign_id==campaign.id)))
@@ -123,30 +125,52 @@ def materialize_missing_schedule_for_account(session: Session, campaign: Campaig
             except json.JSONDecodeError: captions=[]
     existing_positions=set(session.scalars(select(ScheduledPost.position).where(ScheduledPost.campaign_id==campaign.id,ScheduledPost.account_id==account.id)))
     previous=session.scalar(select(ScheduledPost.caption).where(ScheduledPost.account_id==account.id,ScheduledPost.campaign_id==campaign.id).order_by(ScheduledPost.scheduled_for.desc()))
-    created=0
+    jobs=[]
     for day_offset in range(rule.days):
         current=start_date+timedelta(days=day_offset)
-        for range_index,(low,high) in enumerate(ranges_for_day(rule.intervals.split(","),current,now,not_before)):
-            position=day_offset*(1440 if daily_quantity(rule.intervals.split(",")) else 1000)+range_index
+        for range_index,(low,high) in enumerate(ranges_for_day(values,current,now,not_before)):
+            position=day_offset*(1440 if daily_quantity(values) else 1000)+range_index
             if position in existing_positions: continue
-            # Stable randomness means a restart calculates the same occurrence.
             rng=random.Random(f"campaign:{campaign.id}:account:{account.id}:slot:{position}")
             minute=rng.randint(low,high); when=datetime.combine(current,time())+timedelta(minutes=minute)
             if when<=now or (not_before and when<not_before): continue
             source_id=rng.choice(sources) if rule.strategy=="random" else sources[position%len(sources)]
-            seeds=list(session.scalars(select(Media).where(Media.kind=="processed",Media.original_media_id==source_id)))
-            seed=next((media for media in reversed(seeds) if data_path(media.relative_path).is_file()),None)
-            if not seed:
-                audit(session,"SCHEDULE_SYNC_SKIPPED","Não há mídia processada disponível para este slot.",campaign.id,account.id); continue
-            output=_clone_processed_for_schedule(session,campaign.id,source_id,seed,account.id,position)
             if campaign.caption_text: caption=campaign.caption_text
             elif captions:
                 choices=[item for item in captions if item!=previous] or captions; caption=rng.choice(choices); previous=caption
             else: caption=""
-            session.add(ScheduledPost(campaign_id=campaign.id,account_id=account.id,processed_media_id=output.id,caption=caption,scheduled_for=when,position=position,status=PostStatus.PENDING))
-            existing_positions.add(position); created+=1
+            jobs.append({"slot_key":f"sync-{account.id}-{position}-{uuid.uuid4().hex}","source_id":source_id,
+                "account_id":account.id,"position":position,"current":current,"low":low,"high":high,
+                "caption":caption,"when":when})
+    created=0; batch_size=max(1,min(getattr(settings,"processing_batch_size",12),50))
+    for first in range(0,len(jobs),batch_size):
+        if not account_is_eligible(account) or campaign.status!=CampaignStatus.ACTIVE: break
+        results=process_slots_batch(session,campaign.id,jobs[first:first+batch_size])
+        for job,output,cover_data in results:
+            if campaign.cover_path and not cover_data:
+                raise RuntimeError("A campanha exige capa processada; o post não será agendado sem ela")
+            earliest=max(datetime.now()+timedelta(minutes=5),not_before or datetime.min)
+            if job["when"]<earliest:
+                seconds=(earliest-datetime.combine(job["current"],time())).total_seconds()
+                low=max(job["low"],int(-(-seconds//60)))
+                if low>job["high"]:
+                    data_path(output.relative_path).unlink(missing_ok=True)
+                    if output.id is None: session.expunge(output)
+                    else: session.delete(output)
+                    if cover_data: data_path(cover_data[0]).unlink(missing_ok=True)
+                    continue
+                rng=random.Random(job["slot_key"]); job["when"]=datetime.combine(job["current"],time())+timedelta(minutes=rng.randint(low,job["high"]))
+            post=ScheduledPost(campaign_id=campaign.id,account_id=account.id,processed_media_id=output.id,
+                caption=job["caption"],scheduled_for=job["when"],position=job["position"],status=PostStatus.PENDING)
+            session.add(output);session.flush();post.processed_media_id=output.id;session.add(post);session.flush()
+            if cover_data:
+                cover=ProcessedCover(campaign_id=campaign.id,original_media_id=job["source_id"],post_id=post.id,
+                    relative_path=cover_data[0],sha256=cover_data[1])
+                session.add(cover);session.flush();session.add(ScheduledPostCover(post_id=post.id,cover_id=cover.id))
+            created+=1
+        commit_with_retry(session)
     if created:
-        audit(session,"SCHEDULES_CREATED",f"{created} novo(s) agendamento(s) futuro(s) criado(s) automaticamente.",campaign.id,account.id)
+        audit(session,"SCHEDULES_CREATED",f"{created} novo(s) agendamento(s) com vídeo/capa processados criado(s).",campaign.id,account.id)
     return created
 
 def account_campaign_sync_delay_days(session: Session) -> int:
@@ -531,6 +555,9 @@ async def publish_claimed_post(post_id: int, account_ids_in_flight: set[int], se
                 if link:
                     cover=s.get(ProcessedCover,link.cover_id)
                     if cover and data_path(cover.relative_path).is_file(): cover_url=await tunnel.public_url_for(data_path(cover.relative_path))
+                campaign=s.get(Campaign,post.campaign_id)
+                if campaign and campaign.cover_path and not cover_url:
+                    raise RuntimeError("Capa processada obrigatória ausente; publicação interrompida antes de enviar à Meta")
                 post.status=PostStatus.WAITING_META; s.commit()
                 media_id=await meta.publish_reel(account.meta_account_id,meta.decrypt(account.encrypted_token),public_url,post.caption,cover_url)
                 post.status=PostStatus.PUBLISHED; post.last_error=""; attempt.status="PUBLISHED"; attempt.meta_media_id=media_id; attempt.finished_at=datetime.utcnow()
