@@ -24,6 +24,7 @@ from .tunnel import tunnel
 from .media_gateway import media_app
 from .daily_schedule import daily_quantity, daily_ranges, utc_deadline_local
 from .insight_reset import include_after_reset
+from .processing_order import order_pending_jobs
 import uvicorn
 
 # A entrada de uma conta pode criar muitas cópias processadas para campanhas
@@ -142,6 +143,7 @@ def materialize_missing_schedule_for_account(session: Session, campaign: Campaig
             jobs.append({"slot_key":f"sync-{account.id}-{position}-{uuid.uuid4().hex}","source_id":source_id,
                 "account_id":account.id,"position":position,"current":current,"low":low,"high":high,
                 "caption":caption,"when":when})
+    order_pending_jobs(jobs)
     created=0; batch_size=max(1,min(getattr(settings,"processing_batch_size",12),50))
     for first in range(0,len(jobs),batch_size):
         if not account_is_eligible(account) or campaign.status!=CampaignStatus.ACTIVE: break
@@ -522,7 +524,10 @@ def claim_due_posts(session: Session, account_ids_in_flight: set[int], now: date
         or_(ScheduledPost.next_attempt_at.is_(None),ScheduledPost.next_attempt_at<=now),
         # Posts de um lote já validado podem sair enquanto os lotes seguintes
         # ainda estão sendo processados. Nunca há mídia original nesta fila.
-        Campaign.status.in_((CampaignStatus.PROCESSING,CampaignStatus.ACTIVE)),
+        or_(Campaign.status.in_((CampaignStatus.PROCESSING,CampaignStatus.ACTIVE)),
+            (Campaign.status==CampaignStatus.PROCESSING_FAILED) & select(ApplicationSetting.key).where(
+                ApplicationSetting.key==func.printf("generation-plan-%d",Campaign.id)
+            ).exists()),
     ).order_by(ScheduledPost.scheduled_for).limit(limit*4)).all()
     claimed=[]
     for post in due:
@@ -1391,47 +1396,69 @@ def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(
                 if high<low: high+=24*60
                 ranges.append((low,high))
             except ValueError: raise HTTPException(422,f"Intervalo inválido: {left}-{right}. Use HH:MM-HH:MM")
-    post_ids=select(ScheduledPost.id).where(ScheduledPost.campaign_id==campaign_id)
-    s.execute(delete(ScheduledPostCover).where(ScheduledPostCover.post_id.in_(post_ids)))
-    s.execute(delete(ScheduledPost).where(ScheduledPost.campaign_id==campaign_id))
-    c.status=CampaignStatus.PROCESSING; s.commit()
-    # Primeiro montamos as ocorrências. A mídia ainda é original neste ponto;
-    # a agenda só recebe registros depois de o lote devolver cada resultado validado.
-    ordered=sources[:]
-    if body.strategy=="random": random.shuffle(ordered)
-    index=0; position=0; previous_caption_by_account={}; jobs=[]
-    for day_offset in range(body.days):
-        current=body.start_date+timedelta(days=day_offset)
-        if current<date.today(): continue
-        occurrences=([(account_id,low,high) for account_id in accounts
-            for low,high in ranges_for_day(body.intervals,current,datetime.now(),account_not_before.get(account_id))]
-            if body.reels_per_day else [(account_id,low,high) for low,high in ranges for account_id in accounts])
-        for account_id,low,high in occurrences:
-            protected_until=account_not_before.get(account_id)
-            delayed_low=low
-            if protected_until:
-                if current<protected_until.date():
-                    continue
-                if current==protected_until.date():
-                    delayed_low=max(low,protected_until.hour*60+protected_until.minute)
-                    if delayed_low>high:
+    plan_key=f"generation-plan-{campaign_id}"
+    plan=s.get(ApplicationSetting,plan_key) if background_claim else None
+    checkpoint=json.loads(plan.value) if plan else None
+    if checkpoint:
+        jobs=[{**job,"current":date.fromisoformat(job["current"])} for job in checkpoint["jobs"]]
+        first_pending=checkpoint["completed"]
+        position=checkpoint["position"]
+        scheduled=checkpoint["scheduled"]
+        order_pending_jobs(jobs,first_pending)
+        checkpoint["jobs"]=[{**job,"current":job["current"].isoformat()} for job in jobs]
+        checkpoint["processing_order"]="chronological-v1"
+        plan.value=json.dumps(checkpoint)
+        c.status=CampaignStatus.PROCESSING; s.commit()
+    else:
+        post_ids=select(ScheduledPost.id).where(ScheduledPost.campaign_id==campaign_id)
+        s.execute(delete(ScheduledPostCover).where(ScheduledPostCover.post_id.in_(post_ids)))
+        s.execute(delete(ProcessedCover).where(ProcessedCover.campaign_id==campaign_id))
+        s.execute(delete(PublicationAttempt).where(PublicationAttempt.post_id.in_(post_ids)))
+        s.execute(delete(ScheduledPost).where(ScheduledPost.campaign_id==campaign_id))
+        c.status=CampaignStatus.PROCESSING; s.commit()
+        # Primeiro montamos as ocorrências. A mídia ainda é original neste ponto;
+        # a agenda só recebe registros depois de o lote devolver cada resultado validado.
+        ordered=sources[:]
+        if body.strategy=="random": random.shuffle(ordered)
+        index=0; position=0; previous_caption_by_account={}; jobs=[]
+        for day_offset in range(body.days):
+            current=body.start_date+timedelta(days=day_offset)
+            if current<date.today(): continue
+            occurrences=([(account_id,low,high) for account_id in accounts
+                for low,high in ranges_for_day(body.intervals,current,datetime.now(),account_not_before.get(account_id))]
+                if body.reels_per_day else [(account_id,low,high) for low,high in ranges for account_id in accounts])
+            for account_id,low,high in occurrences:
+                protected_until=account_not_before.get(account_id)
+                delayed_low=low
+                if protected_until:
+                    if current<protected_until.date():
                         continue
-            if current==date.today():
-                earliest=datetime.now()+timedelta(minutes=5)
-                if high < earliest.hour*60+earliest.minute: continue
-            source_id=random.choice(sources) if body.strategy=="random" else ordered[index%len(ordered)]
-            index+=1
-            if c.caption_text: caption=c.caption_text
-            elif caption_items:
-                choices=[text for text in caption_items if text!=previous_caption_by_account.get(account_id)] or caption_items
-                caption=random.choice(choices); previous_caption_by_account[account_id]=caption
-            else: caption=""
-            jobs.append({"slot_key":f"slot-{uuid.uuid4().hex}","source_id":source_id,"account_id":account_id,"current":current,"low":delayed_low,"high":high,"caption":caption})
+                    if current==protected_until.date():
+                        delayed_low=max(low,protected_until.hour*60+protected_until.minute)
+                        if delayed_low>high:
+                            continue
+                if current==date.today():
+                    earliest=datetime.now()+timedelta(minutes=5)
+                    if high < earliest.hour*60+earliest.minute: continue
+                source_id=random.choice(sources) if body.strategy=="random" else ordered[index%len(ordered)]
+                index+=1
+                if c.caption_text: caption=c.caption_text
+                elif caption_items:
+                    choices=[text for text in caption_items if text!=previous_caption_by_account.get(account_id)] or caption_items
+                    caption=random.choice(choices); previous_caption_by_account[account_id]=caption
+                else: caption=""
+                jobs.append({"slot_key":f"slot-{uuid.uuid4().hex}","source_id":source_id,"account_id":account_id,"current":current,"low":delayed_low,"high":high,"caption":caption})
+        order_pending_jobs(jobs)
+        first_pending=0; scheduled=0
+        encoded_jobs=[{**job,"current":job["current"].isoformat()} for job in jobs]
+        checkpoint={"jobs":encoded_jobs,"completed":0,"position":0,"scheduled":0,"request":body.model_dump(mode="json"),"processing_order":"chronological-v1"}
+        plan=s.get(ApplicationSetting,plan_key)
+        if not plan: plan=ApplicationSetting(key=plan_key); s.add(plan)
+        plan.value=json.dumps(checkpoint); commit_with_retry(s)
     batch_size=max(1,min(settings.processing_batch_size,50))
-    save_generation_progress(campaign_id,status="RUNNING",total=len(jobs),completed=0,scheduled=0,failed=0,batch_size=batch_size,message="Preparando os lotes de vídeos...",started_at=datetime.utcnow().isoformat())
-    scheduled=0
+    save_generation_progress(campaign_id,status="RUNNING",total=len(jobs),completed=first_pending,scheduled=scheduled,failed=0,batch_size=batch_size,message="Preparando os lotes de vídeos...",started_at=datetime.utcnow().isoformat())
     try:
-        for first in range(0,len(jobs),batch_size):
+        for first in range(first_pending,len(jobs),batch_size):
             if generation_cancelled(s,campaign_id):
                 save_generation_progress(campaign_id,status="CANCELLED",total=len(jobs),completed=first,scheduled=scheduled,failed=0,batch_size=batch_size,message="Campanha cancelada; nenhum novo lote será processado.",finished_at=datetime.utcnow().isoformat())
                 return {"count":scheduled,"status":CampaignStatus.CANCELLED}
@@ -1466,7 +1493,10 @@ def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(
                     data_path(media.relative_path).unlink(missing_ok=True); s.delete(media)
                     if cover_data: data_path(cover_data[0]).unlink(missing_ok=True)
                     continue
-                minute=random.randint(effective_low,job["high"]); when=datetime.combine(job["current"],time())+timedelta(minutes=minute)
+                minute=job.get("planned_minute")
+                if minute is None or not effective_low<=minute<=job["high"]:
+                    minute=random.randint(effective_low,job["high"])
+                when=datetime.combine(job["current"],time())+timedelta(minutes=minute)
                 post=ScheduledPost(campaign_id=campaign_id,account_id=job["account_id"],processed_media_id=media.id,caption=job["caption"],scheduled_for=when,position=position)
                 s.add(post); s.flush()
                 if cover_data:
@@ -1475,6 +1505,11 @@ def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(
                 position+=1; scheduled+=1
             # Torna este lote disponível para o scheduler imediatamente. Assim
             # uma publicação próxima não espera todos os demais lotes.
+            # O cursor e os posts são confirmados na mesma transação. Um
+            # reinício nunca apaga nem repete lotes já confirmados.
+            checkpoint.update(completed=first+len(batch),position=position,scheduled=scheduled)
+            plan=s.get(ApplicationSetting,plan_key)
+            plan.value=json.dumps(checkpoint)
             commit_with_retry(s)
             save_generation_progress(campaign_id,status="RUNNING",total=len(jobs),completed=first+len(batch),scheduled=scheduled,failed=0,batch_size=batch_size,current_batch=f"{first+1}-{first+len(batch)}",message="Lote validado; preparando o próximo...")
         if generation_cancelled(s,campaign_id):
@@ -1493,6 +1528,13 @@ def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(
         c.status=CampaignStatus.ACTIVE; commit_with_retry(s)
         save_generation_progress(campaign_id,status="COMPLETED",total=len(jobs),completed=len(jobs),scheduled=scheduled,failed=0,batch_size=batch_size,message=f"Concluído: {scheduled} posts agendados.",finished_at=datetime.utcnow().isoformat())
         return {"count":position,"status":c.status}
+    except InterruptedError as exc:
+        s.rollback()
+        c=s.get(Campaign,campaign_id)
+        if c and c.status!=CampaignStatus.CANCELLED:
+            c.status=CampaignStatus.PROCESSING; commit_with_retry(s)
+            save_generation_progress(campaign_id,status="INTERRUPTED",total=len(jobs),completed=first,scheduled=scheduled,failed=0,message="Serviço interrompido; a preparação será retomada ao iniciar.",error=str(exc))
+        return {"count":scheduled,"status":c.status if c else CampaignStatus.CANCELLED}
     except Exception as exc:
         s.rollback()
         c=s.get(Campaign,campaign_id); c.status=CampaignStatus.PROCESSING_FAILED; s.commit()
@@ -1526,9 +1568,11 @@ def resume_interrupted_campaign_generations():
         campaigns=list(session.scalars(select(Campaign).where(Campaign.status.in_([CampaignStatus.READY_TO_SCHEDULE,CampaignStatus.PROCESSING]))))
         for campaign in campaigns:
             rule=session.scalar(select(CampaignScheduleRule).where(CampaignScheduleRule.campaign_id==campaign.id))
-            if not rule: continue
+            plan=session.get(ApplicationSetting,f"generation-plan-{campaign.id}")
+            if not rule and not plan: continue
             try:
-                body=GenerateScheduleIn(start_date=date.fromisoformat(rule.start_date),days=rule.days,intervals=[item for item in rule.intervals.split(",") if item],strategy=rule.strategy)
+                saved_request=json.loads(plan.value).get("request") if plan else None
+                body=GenerateScheduleIn(**saved_request) if saved_request else GenerateScheduleIn(start_date=date.fromisoformat(rule.start_date),days=rule.days,intervals=[item for item in rule.intervals.split(",") if item],strategy=rule.strategy)
             except (TypeError,ValueError) as exc:
                 campaign.status=CampaignStatus.PROCESSING_FAILED
                 save_generation_progress(campaign.id,status="FAILED",total=0,completed=0,scheduled=0,failed=1,message="A agenda automática tem uma configuração inválida.",error=str(exc)[:2000],finished_at=datetime.utcnow().isoformat())
@@ -1537,7 +1581,7 @@ def resume_interrupted_campaign_generations():
             pending.append((campaign.id,body))
         session.commit()
     for campaign_id,body in pending:
-        save_generation_progress(campaign_id,status="RUNNING",total=0,completed=0,scheduled=0,failed=0,message="Retomando a preparação automática da campanha...")
+        save_generation_progress(campaign_id,**{**{key:value for key,value in (load_generation_progress(campaign_id) or {}).items() if key not in ("campaign_id","updated_at")},"status":"RUNNING","message":"Retomando a preparação automática da campanha..."})
         threading.Thread(target=run_schedule_background,args=(campaign_id,body),daemon=True,name=f"schedule-resume-{campaign_id}").start()
 @app.post("/api/campaigns/{campaign_id}/start-generation")
 def start_generation(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(db)):
@@ -1546,6 +1590,8 @@ def start_generation(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(d
     if not campaign or campaign.status not in allowed: raise HTTPException(409,"Campaign is already processing or cannot be scheduled")
     if body.days<1 or body.days>366 or not body.intervals: raise HTTPException(422,"Inform days and at least one interval")
     account_count=s.scalar(select(func.count()).select_from(CampaignAccount).where(CampaignAccount.campaign_id==campaign_id)) or 0
+    old_plan=s.get(ApplicationSetting,f"generation-plan-{campaign_id}")
+    if old_plan: s.delete(old_plan)
     campaign.status=CampaignStatus.PROCESSING; s.commit()
     threading.Thread(target=run_schedule_background,args=(campaign_id,body),daemon=True,name=f"schedule-{campaign_id}").start()
     return {"accepted":True,"status":CampaignStatus.PROCESSING,"count":account_count*body.days*(body.reels_per_day or len(body.intervals))}
