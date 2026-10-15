@@ -13,3 +13,5 @@
 .account-preferences label { display: grid; gap: 6px; }
 .account-group { margin-top: 24px; }
 .account-group form { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.account-nickname{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}.account-nickname input{width:220px;max-width:100%;min-width:0}.account-nickname button{padding:8px 12px}

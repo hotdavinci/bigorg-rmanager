@@ -635,6 +635,7 @@ async def life(app):
         if "campaign_sync_due_at" not in account_columns: connection.exec_driver_sql("ALTER TABLE instagram_accounts ADD COLUMN campaign_sync_due_at DATETIME")
         if "campaign_sync_completed_at" not in account_columns: connection.exec_driver_sql("ALTER TABLE instagram_accounts ADD COLUMN campaign_sync_completed_at DATETIME")
         if "posting_delay_days" not in account_columns: connection.exec_driver_sql("ALTER TABLE instagram_accounts ADD COLUMN posting_delay_days INTEGER")
+        if "nickname" not in account_columns: connection.exec_driver_sql("ALTER TABLE instagram_accounts ADD COLUMN nickname VARCHAR(120) NOT NULL DEFAULT ''")
         if "account_group" not in account_columns: connection.exec_driver_sql("ALTER TABLE instagram_accounts ADD COLUMN account_group VARCHAR(120) NOT NULL DEFAULT ''")
         if "deleted_at" not in account_columns: connection.exec_driver_sql("ALTER TABLE instagram_accounts ADD COLUMN deleted_at DATETIME")
         post_columns={row[1] for row in connection.exec_driver_sql("PRAGMA table_info(scheduled_posts)")}
@@ -823,7 +824,21 @@ def restart_app():
 @app.get("/api/meta/accounts")
 def accounts(s:Session=Depends(db)):
     now=datetime.utcnow()
-    return [{"posting_delay_days":a.posting_delay_days,"effective_delay_days":account_campaign_sync_delay_days(s,a),"account_group":a.account_group,"id":a.id,"username":a.username,"nome":a.display_name,"ativo":a.active,"conectada_em":a.connected_at,"expira_em":a.token_expires_at,"verificada_em":a.last_verified_at,"erro":a.last_error,"sincronizacao_devida_em":a.campaign_sync_due_at,"sincronizada_em":a.campaign_sync_completed_at,"apta":account_is_eligible(a,now),"status":"APTA" if account_is_eligible(a,now) else ("TOKEN_EXPIRADO" if a.token_expires_at and a.token_expires_at<=now else "COM_ERRO" if a.last_error else "DESCONECTADA")} for a in s.scalars(select(InstagramAccount).where(InstagramAccount.deleted_at.is_(None)).order_by(InstagramAccount.connected_at.desc()))]
+    return [{"nickname":a.nickname,"posting_delay_days":a.posting_delay_days,"effective_delay_days":account_campaign_sync_delay_days(s,a),"account_group":a.account_group,"id":a.id,"username":a.username,"nome":a.display_name,"ativo":a.active,"conectada_em":a.connected_at,"expira_em":a.token_expires_at,"verificada_em":a.last_verified_at,"erro":a.last_error,"sincronizacao_devida_em":a.campaign_sync_due_at,"sincronizada_em":a.campaign_sync_completed_at,"apta":account_is_eligible(a,now),"status":"APTA" if account_is_eligible(a,now) else ("TOKEN_EXPIRADO" if a.token_expires_at and a.token_expires_at<=now else "COM_ERRO" if a.last_error else "DESCONECTADA")} for a in s.scalars(select(InstagramAccount).where(InstagramAccount.deleted_at.is_(None)).order_by(InstagramAccount.connected_at.desc()))]
+
+class AccountNicknameIn(BaseModel):
+    nickname: str = Field(max_length=120)
+
+
+@app.put("/api/meta/accounts/{account_id}/nickname")
+def save_account_nickname(account_id:int,body:AccountNicknameIn,s:Session=Depends(db)):
+    account=s.get(InstagramAccount,account_id)
+    if not account or account.deleted_at: raise HTTPException(404,"Conta nao encontrada")
+    account.nickname=body.nickname.strip()
+    audit(s,"ACCOUNT_NICKNAME_UPDATED","Apelido da conta atualizado.",account_id=account.id)
+    commit_with_retry(s)
+    return {"id":account.id,"nickname":account.nickname}
+
 
 class AccountPreferencesIn(BaseModel):
     account_ids: list[int] = Field(min_length=1,max_length=10000)

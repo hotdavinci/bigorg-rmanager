@@ -19,6 +19,7 @@ class InstagramAccount(Base):
     profile_picture_url: Mapped[str]=mapped_column(String(500), default=""); encrypted_token: Mapped[str]=mapped_column(Text); token_type: Mapped[str]=mapped_column(String(30), default="instagram_user")
     token_expires_at: Mapped[datetime|None]=mapped_column(DateTime); active: Mapped[bool]=mapped_column(Boolean, default=True); connected_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow); last_verified_at: Mapped[datetime|None]=mapped_column(DateTime); last_error: Mapped[str]=mapped_column(Text, default=""); last_insights_error: Mapped[str]=mapped_column(Text, default=""); campaign_sync_due_at: Mapped[datetime|None]=mapped_column(DateTime); campaign_sync_completed_at: Mapped[datetime|None]=mapped_column(DateTime); deleted_at: Mapped[datetime|None]=mapped_column(DateTime)
     posting_delay_days: Mapped[int|None]=mapped_column(Integer,nullable=True)
+    nickname: Mapped[str]=mapped_column(String(120),default="",server_default="")
     account_group: Mapped[str]=mapped_column(String(120),default="",server_default="")
 class OAuthState(Base):
     __tablename__="oauth_states"

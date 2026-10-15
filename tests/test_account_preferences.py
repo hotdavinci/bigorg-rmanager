@@ -46,6 +46,22 @@ class AccountPreferencesTests(unittest.TestCase):
         with self.assertRaises(HTTPException):
             main.save_account_preferences(main.AccountPreferencesIn(account_ids=[self.a.id,999],posting_delay_days=4),self.s)
         self.assertIsNone(self.a.posting_delay_days)
+    def test_individual_nickname_preserves_identity_and_preferences(self):
+        self.a.username="original"
+        self.a.account_group="Group"
+        self.a.posting_delay_days=7
+        self.s.commit()
+        result=main.save_account_nickname(self.a.id,main.AccountNicknameIn(nickname="  Alias  "),self.s)
+        self.assertEqual(result["nickname"],"Alias")
+        self.assertEqual(self.a.username,"original")
+        self.assertEqual(self.a.account_group,"Group")
+        self.assertEqual(self.a.posting_delay_days,7)
+        self.assertEqual(self.b.nickname,"")
+        main.save_account_nickname(self.a.id,main.AccountNicknameIn(nickname=""),self.s)
+        self.assertEqual(self.a.nickname,"")
+        with self.assertRaises(HTTPException): main.save_account_nickname(999,main.AccountNicknameIn(nickname="x"),self.s)
+        with self.assertRaises(ValidationError): main.AccountNicknameIn(nickname="x"*121)
+
     def test_validation(self):
         for value in (-1,366):
             with self.assertRaises(ValidationError): main.AccountPreferencesIn(account_ids=[1],posting_delay_days=value)

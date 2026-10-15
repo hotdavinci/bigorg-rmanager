@@ -963,6 +963,11 @@ function App() {
         {page === "Contas" && (
           <AccountsPage
             accounts={accounts}
+            saveNickname={async (id: number, nickname: string) => {
+              await api(`/meta/accounts/${id}/nickname`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ nickname }) });
+              await api("/meta/accounts").then(setAccounts);
+              setNotice("Apelido da conta salvo.");
+            }}
             savePreferences={async (ids: number[], values: any) => {
               await api("/meta/accounts/preferences", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ account_ids: ids, ...values }) });
               await api("/meta/accounts").then(setAccounts);
@@ -2452,6 +2457,7 @@ function AccountsPage({
   remove,
   bulkRemove,
   savePreferences,
+  saveNickname,
 }: any) {
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [delay, setDelay] = useState("1");
@@ -2488,8 +2494,19 @@ function AccountsPage({
             : [...ids, account.id],
         )}
       />
-      <span className="account-details">
-        <b>@{account.username || account.nome}</b>
+      <div className="account-details">
+        <b>{account.nickname ? `${account.nickname} · @${account.username || account.nome}` : `@${account.username || account.nome}`}</b>
+        <form className="account-nickname" key={`${account.id}-${account.nickname || ""}`} onSubmit={async (event) => {
+          event.preventDefault();
+          const nickname = String(new FormData(event.currentTarget).get("nickname") || "").trim();
+          setSaving(true); setError("");
+          try { await saveNickname(account.id, nickname); }
+          catch (error: any) { setError(error.message); }
+          finally { setSaving(false); }
+        }}>
+          <input name="nickname" defaultValue={account.nickname || ""} maxLength={120} aria-label={`Apelido de @${account.username || account.nome}`} placeholder="Apelido (opcional)" />
+          <button className="secondary" disabled={saving}>Salvar apelido</button>
+        </form>
         <small>Postar após {account.effective_delay_days} dia(s) da vinculação · {account.posting_delay_days == null ? "Padrão global" : "Prazo da conta"}
           {account.sincronizacao_devida_em ? ` · Liberada em ${eventDate(account.sincronizacao_devida_em)}` : ""}
         </small>
@@ -2499,7 +2516,7 @@ function AccountsPage({
             : "Ainda não validada"}
           {account.erro ? ` · ${account.erro}` : ""}
         </small>
-      </span>
+      </div>
       <span className="row-actions">
         <span className={`tag ${account.apta ? "" : "tag-error"}`}>
           {account.apta ? "APTA A PUBLICAR" : account.status || "COM ERRO"}
