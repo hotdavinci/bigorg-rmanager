@@ -175,14 +175,15 @@ def materialize_missing_schedule_for_account(session: Session, campaign: Campaig
         audit(session,"SCHEDULES_CREATED",f"{created} novo(s) agendamento(s) com vídeo/capa processados criado(s).",campaign.id,account.id)
     return created
 
-def account_campaign_sync_delay_days(session: Session) -> int:
+def account_campaign_sync_delay_days(session: Session, account: InstagramAccount|None=None) -> int:
+    if account is not None and account.posting_delay_days is not None: return account.posting_delay_days
     item=session.get(ApplicationSetting,"account_campaign_sync_delay_days")
     try: return max(0,min(365,int(item.value if item else 1)))
     except (TypeError,ValueError): return 1
 
 def schedule_account_campaign_sync(session: Session, account: InstagramAccount) -> int:
     """Sets the first allowed publication time for a newly connected account."""
-    days=account_campaign_sync_delay_days(session)
+    days=account_campaign_sync_delay_days(session,account)
     account.campaign_sync_due_at=account.connected_at+timedelta(days=days)
     account.campaign_sync_completed_at=None
     audit(session,"ACCOUNT_SYNC_WAITING",f"Conta validada; os horários anteriores a {account.campaign_sync_due_at:%d/%m/%Y %H:%M} serão ignorados.",account_id=account.id)
@@ -519,7 +520,8 @@ def recover_stalled_claims(session: Session, now: datetime) -> int:
     return len(stuck)
 
 def claim_due_posts(session: Session, account_ids_in_flight: set[int], now: datetime, limit: int) -> list[int]:
-    due=session.scalars(select(ScheduledPost).join(Campaign).where(
+    due=session.scalars(select(ScheduledPost).join(Campaign).join(InstagramAccount,ScheduledPost.account_id==InstagramAccount.id).where(
+        or_(InstagramAccount.campaign_sync_due_at.is_(None),InstagramAccount.campaign_sync_due_at<=datetime.utcnow()),
         ScheduledPost.status==PostStatus.PENDING, ScheduledPost.scheduled_for<=now,
         or_(ScheduledPost.next_attempt_at.is_(None),ScheduledPost.next_attempt_at<=now),
         # Posts de um lote já validado podem sair enquanto os lotes seguintes
@@ -552,6 +554,8 @@ async def publish_claimed_post(post_id: int, account_ids_in_flight: set[int], se
                 if not account_is_eligible(account):
                     cancel_account_from_active_campaigns(s,account,"Conta não está apta a publicar")
                     s.commit(); return
+                if account.campaign_sync_due_at and account.campaign_sync_due_at>datetime.utcnow():
+                    post.status=PostStatus.PENDING; s.commit(); return
                 post.status=PostStatus.UPLOADING; attempt=PublicationAttempt(post_id=post.id,status="UPLOADING"); s.add(attempt); s.commit()
                 media_path=data_path(media.relative_path)
                 if not media_path.is_file(): raise RuntimeError("Arquivo processado não existe mais")
@@ -630,6 +634,8 @@ async def life(app):
         if "last_insights_error" not in account_columns: connection.exec_driver_sql("ALTER TABLE instagram_accounts ADD COLUMN last_insights_error TEXT NOT NULL DEFAULT ''")
         if "campaign_sync_due_at" not in account_columns: connection.exec_driver_sql("ALTER TABLE instagram_accounts ADD COLUMN campaign_sync_due_at DATETIME")
         if "campaign_sync_completed_at" not in account_columns: connection.exec_driver_sql("ALTER TABLE instagram_accounts ADD COLUMN campaign_sync_completed_at DATETIME")
+        if "posting_delay_days" not in account_columns: connection.exec_driver_sql("ALTER TABLE instagram_accounts ADD COLUMN posting_delay_days INTEGER")
+        if "account_group" not in account_columns: connection.exec_driver_sql("ALTER TABLE instagram_accounts ADD COLUMN account_group VARCHAR(120) NOT NULL DEFAULT ''")
         if "deleted_at" not in account_columns: connection.exec_driver_sql("ALTER TABLE instagram_accounts ADD COLUMN deleted_at DATETIME")
         post_columns={row[1] for row in connection.exec_driver_sql("PRAGMA table_info(scheduled_posts)")}
         if "next_attempt_at" not in post_columns: connection.exec_driver_sql("ALTER TABLE scheduled_posts ADD COLUMN next_attempt_at DATETIME")
@@ -817,7 +823,30 @@ def restart_app():
 @app.get("/api/meta/accounts")
 def accounts(s:Session=Depends(db)):
     now=datetime.utcnow()
-    return [{"id":a.id,"username":a.username,"nome":a.display_name,"ativo":a.active,"conectada_em":a.connected_at,"expira_em":a.token_expires_at,"verificada_em":a.last_verified_at,"erro":a.last_error,"sincronizacao_devida_em":a.campaign_sync_due_at,"sincronizada_em":a.campaign_sync_completed_at,"apta":account_is_eligible(a,now),"status":"APTA" if account_is_eligible(a,now) else ("TOKEN_EXPIRADO" if a.token_expires_at and a.token_expires_at<=now else "COM_ERRO" if a.last_error else "DESCONECTADA")} for a in s.scalars(select(InstagramAccount).where(InstagramAccount.deleted_at.is_(None)).order_by(InstagramAccount.connected_at.desc()))]
+    return [{"posting_delay_days":a.posting_delay_days,"effective_delay_days":account_campaign_sync_delay_days(s,a),"account_group":a.account_group,"id":a.id,"username":a.username,"nome":a.display_name,"ativo":a.active,"conectada_em":a.connected_at,"expira_em":a.token_expires_at,"verificada_em":a.last_verified_at,"erro":a.last_error,"sincronizacao_devida_em":a.campaign_sync_due_at,"sincronizada_em":a.campaign_sync_completed_at,"apta":account_is_eligible(a,now),"status":"APTA" if account_is_eligible(a,now) else ("TOKEN_EXPIRADO" if a.token_expires_at and a.token_expires_at<=now else "COM_ERRO" if a.last_error else "DESCONECTADA")} for a in s.scalars(select(InstagramAccount).where(InstagramAccount.deleted_at.is_(None)).order_by(InstagramAccount.connected_at.desc()))]
+
+class AccountPreferencesIn(BaseModel):
+    account_ids: list[int] = Field(min_length=1,max_length=10000)
+    posting_delay_days: int|None = Field(default=None,ge=0,le=365)
+    account_group: str = Field(default="",max_length=120)
+
+
+@app.put("/api/meta/accounts/preferences")
+def save_account_preferences(body:AccountPreferencesIn,s:Session=Depends(db)):
+    ids=set(body.account_ids)
+    rows=list(s.scalars(select(InstagramAccount).where(InstagramAccount.id.in_(ids),InstagramAccount.deleted_at.is_(None))))
+    if len(rows)!=len(ids): raise HTTPException(404,"Conta selecionada nao encontrada")
+    fields=body.model_fields_set
+    if not fields.intersection({"posting_delay_days","account_group"}): raise HTTPException(422,"Informe uma configuracao")
+    for account in rows:
+        if "account_group" in fields: account.account_group=body.account_group.strip()
+        if "posting_delay_days" in fields:
+            account.posting_delay_days=body.posting_delay_days
+            account.campaign_sync_due_at=account.connected_at+timedelta(days=account_campaign_sync_delay_days(s,account))
+        audit(s,"ACCOUNT_PREFERENCES_UPDATED","Preferencias de prazo/grupo atualizadas.",account_id=account.id)
+    commit_with_retry(s)
+    return {"updated":len(rows)}
+
 
 @app.post("/api/meta/accounts/refresh-health")
 async def refresh_accounts_health():
@@ -832,7 +861,10 @@ def account_campaign_sync_settings(s:Session=Depends(db)):
 def save_account_campaign_sync_settings(delay_days:int=Body(...,embed=True),s:Session=Depends(db)):
     if delay_days<0 or delay_days>365: raise HTTPException(422,"Informe entre 0 e 365 dias")
     item=s.get(ApplicationSetting,"account_campaign_sync_delay_days") or ApplicationSetting(key="account_campaign_sync_delay_days")
-    item.value=str(delay_days); s.add(item); commit_with_retry(s)
+    item.value=str(delay_days); s.add(item)
+    for account in s.scalars(select(InstagramAccount).where(InstagramAccount.deleted_at.is_(None),InstagramAccount.posting_delay_days.is_(None))):
+        account.campaign_sync_due_at=account.connected_at+timedelta(days=delay_days)
+    commit_with_retry(s)
     return {"delay_days":delay_days}
 @app.get("/api/meta/oauth/start")
 def oauth_start(s:Session=Depends(db)):

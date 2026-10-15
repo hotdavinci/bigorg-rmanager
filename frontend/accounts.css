@@ -8,3 +8,8 @@
 .account-choice .danger{padding:8px 11px}
 .account-choice .account-details{flex:1;min-width:0}.account-choice .account-select{flex:0 0 auto;width:18px;height:18px;margin:0;cursor:pointer;accent-color:#9575ed}
 .account-open{border:1px solid #6651bc;background:#2c2946;color:#d9d1ff}.account-error-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:28px}.account-error-heading .account-section-title{margin:0}
+
+.account-preferences { display: grid; gap: 12px; padding: 18px; margin: 20px 0; border: 1px solid #39364e; border-radius: 12px; }
+.account-preferences label { display: grid; gap: 6px; }
+.account-group { margin-top: 24px; }
+.account-group form { display: flex; flex-wrap: wrap; gap: 8px; }

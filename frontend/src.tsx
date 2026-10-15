@@ -963,6 +963,11 @@ function App() {
         {page === "Contas" && (
           <AccountsPage
             accounts={accounts}
+            savePreferences={async (ids: number[], values: any) => {
+              await api("/meta/accounts/preferences", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ account_ids: ids, ...values }) });
+              await api("/meta/accounts").then(setAccounts);
+              setNotice("Configurações das contas salvas.");
+            }}
             connectionUrl={directInstagramConnectionUrl}
             copyLink={copyInstagramConnectionLink}
             openReels={openAccountReels}
@@ -2446,8 +2451,20 @@ function AccountsPage({
   openReels,
   remove,
   bulkRemove,
+  savePreferences,
 }: any) {
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [delay, setDelay] = useState("1");
+  const [groupTitle, setGroupTitle] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const save = async (ids: number[], values: any) => {
+    setSaving(true); setError("");
+    try { await savePreferences(ids, values); }
+    catch (error: any) { setError(error.message); }
+    finally { setSaving(false); }
+  };
+  const groups = Array.from(new Set<string>(accounts.map((a: any) => a.account_group || ""))).sort();
   useEffect(() => {
     setSelectedIds((ids) =>
       ids.filter((id) => accounts.some((account: any) => account.id === id)),
@@ -2473,6 +2490,9 @@ function AccountsPage({
       />
       <span className="account-details">
         <b>@{account.username || account.nome}</b>
+        <small>Postar após {account.effective_delay_days} dia(s) da vinculação · {account.posting_delay_days == null ? "Padrão global" : "Prazo da conta"}
+          {account.sincronizacao_devida_em ? ` · Liberada em ${eventDate(account.sincronizacao_devida_em)}` : ""}
+        </small>
         <small>
           {account.verificada_em
             ? `Última verificação: ${eventDate(account.verificada_em)}`
@@ -2542,32 +2562,41 @@ function AccountsPage({
           </button>
         )}
       </div>
-      <h2>Contas ativas</h2>
-      {active.length ? (
-        <div className="account-list">{active.map(render)}</div>
-      ) : (
-        <Empty text="Nenhuma conta está saudável e apta a publicar." />
-      )}
-      <div className="account-error-heading">
-        <h2 className="account-section-title">
-          Contas com erro ou desconectadas
-        </h2>
-        {inactive.length > 0 && (
-          <button
-            className="danger"
-            onClick={() =>
-              bulkRemove(inactive.map((account: any) => account.id))
-            }
-          >
-            Apagar todas com erro ({inactive.length})
-          </button>
-        )}
+      <div className="account-preferences">
+        <b>Configurar {selectedIds.length} conta(s) selecionada(s)</b>
+        <small>O prazo da conta tem prioridade sobre o global e é contado desde a vinculação. Posts concluídos são preservados.</small>
+        <div className="toolbar account-toolbar">
+          <label>Dias após vinculação <input type="number" min="0" max="365" step="1" value={delay} onChange={(e) => setDelay(e.target.value)} /></label>
+          <button disabled={saving || !selectedIds.length || delay === "" || !Number.isInteger(Number(delay)) || Number(delay) < 0 || Number(delay) > 365} onClick={() => save(selectedIds, { posting_delay_days: Number(delay) })}>Aplicar prazo</button>
+          <button disabled={saving || !selectedIds.length} onClick={() => save(selectedIds, { posting_delay_days: null })}>Usar prazo global</button>
+        </div>
+        <div className="toolbar account-toolbar">
+          <label>Grupo <input maxLength={120} list="account-group-titles" value={groupTitle} onChange={(e) => setGroupTitle(e.target.value)} placeholder="Título do grupo" /></label>
+          <datalist id="account-group-titles">{groups.filter(Boolean).map((title) => <option key={title} value={title} />)}</datalist>
+          <button disabled={saving || !selectedIds.length || !groupTitle.trim()} onClick={() => save(selectedIds, { account_group: groupTitle.trim() })}>Agrupar selecionadas</button>
+          <button disabled={saving || !selectedIds.length} onClick={() => save(selectedIds, { account_group: "" })}>Remover do grupo</button>
+        </div>
+        {error && <p role="alert">{error}</p>}
       </div>
-      {inactive.length ? (
-        <div className="account-list">{inactive.map(render)}</div>
-      ) : (
-        <p className="muted">Nenhuma conta com erro.</p>
-      )}
+      {groups.map((title) => {
+        const members = accounts.filter((a: any) => (a.account_group || "") === title);
+        const healthy = members.filter((a: any) => a.apta);
+        const unhealthy = members.filter((a: any) => !a.apta);
+        return <section key={title} className="account-group">
+          <div className="toolbar account-toolbar">
+            <h2>{title || "Sem grupo"} ({members.length})</h2>
+            <button disabled={saving} onClick={() => setSelectedIds((ids) => Array.from(new Set([...ids, ...members.map((a: any) => a.id)])))}>Selecionar grupo</button>
+            {title && <form onSubmit={(e) => { e.preventDefault(); const data = new FormData(e.currentTarget); const name = String(data.get("title") || "").trim(); if (name) save(members.map((a: any) => a.id), { account_group: name }); }}>
+              <input name="title" aria-label={`Novo título de ${title}`} defaultValue={title} maxLength={120} required />
+              <button disabled={saving}>Renomear grupo</button>
+            </form>}
+          </div>
+          {!!healthy.length && <><h3>Contas aptas</h3><div className="account-list">{healthy.map(render)}</div></>}
+          {!!unhealthy.length && <><h3>Contas com erro ou desconectadas</h3><div className="account-list">{unhealthy.map(render)}</div></>}
+        </section>;
+      })}
+      {!accounts.length && <Empty text="Nenhuma conta conectada." />}
+      {!!inactive.length && <button className="danger" onClick={() => bulkRemove(inactive.map((a: any) => a.id))}>Apagar todas com erro ({inactive.length})</button>}
     </div>
   );
 }
