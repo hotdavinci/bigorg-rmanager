@@ -145,6 +145,28 @@ class CampaignAccountSyncTests(unittest.TestCase):
         self.assertTrue(publish.await_args.args[4].startswith('https://media.example/'))
         self.assertNotEqual(publish.await_args.args[2],publish.await_args.args[4])
 
+    def test_media_error_retries_only_post_and_preserves_account_agenda(self):
+        with self.Session() as session:
+            campaign,account=self.seed(session)
+            video=session.scalar(select(Media).where(Media.kind=='processed'))
+            session.add(CampaignAccount(campaign_id=campaign.id,account_id=account.id))
+            post=ScheduledPost(campaign_id=campaign.id,account_id=account.id,processed_media_id=video.id,scheduled_for=datetime.now(),status=PostStatus.CLAIMED,attempts=1)
+            future=ScheduledPost(campaign_id=campaign.id,account_id=account.id,processed_media_id=video.id,scheduled_for=datetime.now()+timedelta(hours=1),status=PostStatus.PENDING)
+            session.add_all([post,future]);session.commit();post_id=post.id;future_id=future.id;account_id=account.id
+        failure=RuntimeError('Falha ao publicar Reel: {"error":{"message":"Fatal","type":"OAuthException","code":-1,"error_subcode":2207032,"is_transient":false}}')
+        publish=AsyncMock(side_effect=failure)
+        with patch.object(main,'DbSession',self.Session),patch.object(main.tunnel,'public_url_for',AsyncMock(return_value='https://media.example/video')),patch.object(main.meta,'decrypt',return_value='synthetic-token'),patch.object(main.meta,'publish_reel',publish):
+            asyncio.run(main.publish_claimed_post(post_id,set(),asyncio.Semaphore(1)))
+        publish.assert_awaited_once()
+        with self.Session() as session:
+            self.assertTrue(session.get(InstagramAccount,account_id).active)
+            self.assertEqual(session.get(InstagramAccount,account_id).last_error,"")
+            self.assertEqual(session.get(ScheduledPost,future_id).status,PostStatus.PENDING)
+            retried=session.get(ScheduledPost,post_id)
+            self.assertEqual(retried.status,PostStatus.PENDING)
+            self.assertIsNotNone(retried.next_attempt_at)
+            self.assertIsNotNone(session.scalar(select(CampaignAccount).where(CampaignAccount.account_id==account_id)))
+
     def test_retry_backoff_is_progressive_and_bounded(self):
         self.assertEqual(main.retry_delay(1),30)
         self.assertEqual(main.retry_delay(2),60)

@@ -25,6 +25,7 @@ from .media_gateway import media_app
 from .daily_schedule import daily_quantity, daily_ranges, utc_deadline_local
 from .insight_reset import include_after_reset
 from .processing_order import order_pending_jobs
+from .account_errors import account_access_failed
 import uvicorn
 
 # A entrada de uma conta pode criar muitas cópias processadas para campanhas
@@ -44,8 +45,7 @@ def account_is_eligible(account: InstagramAccount, now: datetime|None=None) -> b
     return bool(not account.deleted_at and account.active and account.encrypted_token and account.last_verified_at and not (account.last_error or "").strip() and (not account.token_expires_at or account.token_expires_at>now))
 
 def is_definitive_account_error(error: Exception) -> bool:
-    message=str(error).lower()
-    return any(token in message for token in ("invalid token","error validating access token","oauth","permission","not authorized","unsupported post request","checkpoint","code 190","code=190"))
+    return account_access_failed(error,verification=True)
 
 def audit(session: Session, event_type: str, message: str, campaign_id: int|None=None, account_id: int|None=None):
     session.add(AuditLog(event_type=event_type,message=message,campaign_id=campaign_id,account_id=account_id))
@@ -500,8 +500,7 @@ async def account_health_scheduler():
         await asyncio.sleep(300)
 
 def is_definitive_publish_error(error: Exception) -> bool:
-    message=str(error).lower()
-    return any(token in message for token in ("invalid token","expired","permission","oauth","401","403","unsupported post request","not authorized","checkpoint"))
+    return account_access_failed(error)
 
 def retry_delay(attempt_number: int) -> int:
     """30s, 60s, 120s — short enough for a late post, bounded for the API."""
