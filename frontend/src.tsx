@@ -2450,7 +2450,7 @@ function InsightsPage({
   );
 }
 function AccountsPage({
-  accounts,
+  accounts: allAccounts,
   connectionUrl,
   copyLink,
   openReels,
@@ -2459,7 +2459,15 @@ function AccountsPage({
   savePreferences,
   saveNickname,
 }: any) {
-  const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const linkedAt = (account: any) => {
+    const value = String(account.conectada_em || "");
+    const timestamp = Date.parse(/(?:Z|[+-]\d{2}:\d{2})$/.test(value) ? value : `${value}Z`);
+    return Number.isFinite(timestamp) ? timestamp : 0;
+  };
+  const accounts = allAccounts.filter((account: any) => account.apta)
+    .sort((a: any, b: any) => linkedAt(b) - linkedAt(a) || b.id - a.id);
+  const [selectedIdsState, setSelectedIds] = useState<number[]>([]);
+  const selectedIds = selectedIdsState.filter((id) => accounts.some((account: any) => account.id === id));
   const [delay, setDelay] = useState("1");
   const [groupTitle, setGroupTitle] = useState("");
   const [saving, setSaving] = useState(false);
@@ -2470,17 +2478,16 @@ function AccountsPage({
     catch (error: any) { setError(error.message); }
     finally { setSaving(false); }
   };
-  const groups = Array.from(new Set<string>(accounts.map((a: any) => a.account_group || ""))).sort();
+  const groups = Array.from(new Set<string>(accounts.map((a: any) => a.account_group || "")));
   useEffect(() => {
     setSelectedIds((ids) =>
       ids.filter((id) => accounts.some((account: any) => account.id === id)),
     );
-  }, [accounts]);
+  }, [allAccounts]);
   const allSelected = accounts.length > 0 && accounts.every(
     (account: any) => selectedIds.includes(account.id),
   );
   const active = accounts.filter((account: any) => account.apta);
-  const inactive = accounts.filter((account: any) => !account.apta);
   const render = (account: any) => (
     <article className="account-choice" key={account.id}>
       <input
@@ -2507,6 +2514,7 @@ function AccountsPage({
           <input name="nickname" defaultValue={account.nickname || ""} maxLength={120} aria-label={`Apelido de @${account.username || account.nome}`} placeholder="Apelido (opcional)" />
           <button className="secondary" disabled={saving}>Salvar apelido</button>
         </form>
+        <small>Vinculada via OAuth em: {account.conectada_em ? eventDate(account.conectada_em) : "Data não disponível"}</small>
         <small>Postar após {account.effective_delay_days} dia(s) da vinculação · {account.posting_delay_days == null ? "Padrão global" : "Prazo da conta"}
           {account.sincronizacao_devida_em ? ` · Liberada em ${eventDate(account.sincronizacao_devida_em)}` : ""}
         </small>
@@ -2557,6 +2565,7 @@ function AccountsPage({
           </button>
         </div>
       </div>
+      <p className="muted">Somente contas aptas · Mais recentes primeiro em cada grupo, pela vinculação OAuth.</p>
       <div className="toolbar account-toolbar">
         <button
           className="secondary"
@@ -2598,22 +2607,19 @@ function AccountsPage({
       {groups.map((title) => {
         const members = accounts.filter((a: any) => (a.account_group || "") === title);
         const healthy = members.filter((a: any) => a.apta);
-        const unhealthy = members.filter((a: any) => !a.apta);
         return <section key={title} className="account-group">
           <div className="toolbar account-toolbar">
             <h2>{title || "Sem grupo"} ({members.length})</h2>
             <button disabled={saving} onClick={() => setSelectedIds((ids) => Array.from(new Set([...ids, ...members.map((a: any) => a.id)])))}>Selecionar grupo</button>
-            {title && <form onSubmit={(e) => { e.preventDefault(); const data = new FormData(e.currentTarget); const name = String(data.get("title") || "").trim(); if (name) save(members.map((a: any) => a.id), { account_group: name }); }}>
+            {title && <form onSubmit={(e) => { e.preventDefault(); const data = new FormData(e.currentTarget); const name = String(data.get("title") || "").trim(); if (name) save(allAccounts.filter((a: any) => (a.account_group || "") === title).map((a: any) => a.id), { account_group: name }); }}>
               <input name="title" aria-label={`Novo título de ${title}`} defaultValue={title} maxLength={120} required />
               <button disabled={saving}>Renomear grupo</button>
             </form>}
           </div>
           {!!healthy.length && <><h3>Contas aptas</h3><div className="account-list">{healthy.map(render)}</div></>}
-          {!!unhealthy.length && <><h3>Contas com erro ou desconectadas</h3><div className="account-list">{unhealthy.map(render)}</div></>}
         </section>;
       })}
-      {!accounts.length && <Empty text="Nenhuma conta conectada." />}
-      {!!inactive.length && <button className="danger" onClick={() => bulkRemove(inactive.map((a: any) => a.id))}>Apagar todas com erro ({inactive.length})</button>}
+      {!accounts.length && <Empty text="Nenhuma conta apta no momento. Contas com erro estão ocultas." />}
     </div>
   );
 }
