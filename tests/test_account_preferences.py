@@ -62,6 +62,35 @@ class AccountPreferencesTests(unittest.TestCase):
         with self.assertRaises(HTTPException): main.save_account_nickname(999,main.AccountNicknameIn(nickname="x"),self.s)
         with self.assertRaises(ValidationError): main.AccountNicknameIn(nickname="x"*121)
 
+    def test_fractional_days_global_override_and_roundtrip(self):
+        main.save_account_campaign_sync_settings(0.5,self.s)
+        self.assertEqual(main.account_campaign_sync_delay_days(self.s),0.5)
+        self.assertEqual(self.a.campaign_sync_due_at,self.connected+timedelta(hours=12))
+        main.save_account_preferences(main.AccountPreferencesIn(account_ids=[self.a.id],posting_delay_days=1.5),self.s)
+        self.s.expire_all()
+        self.assertEqual(self.s.get(InstagramAccount,self.a.id).posting_delay_days,1.5)
+        self.assertEqual(self.a.campaign_sync_due_at,self.connected+timedelta(hours=36))
+        main.save_account_campaign_sync_settings(0.25,self.s)
+        self.assertEqual(self.a.campaign_sync_due_at,self.connected+timedelta(hours=36))
+        self.assertEqual(self.b.campaign_sync_due_at,self.connected+timedelta(hours=6))
+        main.save_account_preferences(main.AccountPreferencesIn(account_ids=[self.a.id],posting_delay_days=None),self.s)
+        self.assertEqual(self.a.campaign_sync_due_at,self.connected+timedelta(hours=6))
+        for value in (float('nan'),float('inf'),float('-inf')):
+            with self.assertRaises(ValidationError): main.AccountPreferencesIn(account_ids=[self.a.id],posting_delay_days=value)
+
+    def test_legacy_sqlite_integer_column_preserves_fraction(self):
+        from sqlalchemy.schema import CreateTable
+        ddl=str(CreateTable(InstagramAccount.__table__).compile(self.engine))
+        self.assertIn("posting_delay_days FLOAT",ddl)
+        legacy=create_engine("sqlite:///:memory:")
+        with legacy.begin() as connection:
+            connection.exec_driver_sql(ddl.replace("posting_delay_days FLOAT","posting_delay_days INTEGER"))
+        with Session(legacy) as session:
+            a=InstagramAccount(meta_account_id="legacy-synthetic",encrypted_token="synthetic",posting_delay_days=0.5)
+            session.add(a);session.commit();session.expire_all()
+            self.assertEqual(session.get(InstagramAccount,a.id).posting_delay_days,0.5)
+        legacy.dispose()
+
     def test_validation(self):
         for value in (-1,366):
             with self.assertRaises(ValidationError): main.AccountPreferencesIn(account_ids=[1],posting_delay_days=value)

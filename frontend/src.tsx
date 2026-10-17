@@ -1188,19 +1188,19 @@ function App() {
               </div>
               <div className="defaults-grid">
                 <label>
-                  Prazo padrão (dias inteiros)
+                  Prazo padrão (dias, aceita frações)
                   <input
                     type="number"
                     min="0"
                     max="365"
+                    step="any"
                     value={accountSyncDelay}
                     onChange={(e) =>
                       setAccountSyncDelay(Number(e.target.value))
                     }
                   />
                   <small>
-                    0 adiciona assim que a conta for validada; 1, 2 ou 3
-                    aguardam esse número de dias.
+                    0 libera após validação; 0.5 = 12 horas; 1 = 24 horas; 1.5 = 36 horas.
                   </small>
                 </label>
               </div>
@@ -2583,8 +2583,8 @@ function AccountsPage({
         <b>Configurar {selectedIds.length} conta(s) selecionada(s)</b>
         <small>O prazo da conta tem prioridade sobre o global e é contado desde a vinculação. Posts concluídos são preservados.</small>
         <div className="toolbar account-toolbar">
-          <label>Dias após vinculação <input type="number" min="0" max="365" step="1" value={delay} onChange={(e) => setDelay(e.target.value)} /></label>
-          <button disabled={saving || !selectedIds.length || delay === "" || !Number.isInteger(Number(delay)) || Number(delay) < 0 || Number(delay) > 365} onClick={() => save(selectedIds, { posting_delay_days: Number(delay) })}>Aplicar prazo</button>
+          <label>Dias após vinculação <input type="number" min="0" max="365" step="any" value={delay} onChange={(e) => setDelay(e.target.value)} /></label>
+          <button disabled={saving || !selectedIds.length || delay === "" || !Number.isFinite(Number(delay)) || Number(delay) < 0 || Number(delay) > 365} onClick={() => save(selectedIds, { posting_delay_days: Number(delay) })}>Aplicar prazo</button>
           <button disabled={saving || !selectedIds.length} onClick={() => save(selectedIds, { posting_delay_days: null })}>Usar prazo global</button>
         </div>
         <div className="toolbar account-toolbar">

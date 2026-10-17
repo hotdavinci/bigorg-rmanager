@@ -175,13 +175,16 @@ def materialize_missing_schedule_for_account(session: Session, campaign: Campaig
         audit(session,"SCHEDULES_CREATED",f"{created} novo(s) agendamento(s) com vídeo/capa processados criado(s).",campaign.id,account.id)
     return created
 
-def account_campaign_sync_delay_days(session: Session, account: InstagramAccount|None=None) -> int:
+def account_campaign_sync_delay_days(session: Session, account: InstagramAccount|None=None) -> float:
     if account is not None and account.posting_delay_days is not None: return account.posting_delay_days
     item=session.get(ApplicationSetting,"account_campaign_sync_delay_days")
-    try: return max(0,min(365,int(item.value if item else 1)))
+    try:
+        import math
+        days=float(item.value if item else 1)
+        return max(0,min(365,days)) if math.isfinite(days) else 1
     except (TypeError,ValueError): return 1
 
-def schedule_account_campaign_sync(session: Session, account: InstagramAccount) -> int:
+def schedule_account_campaign_sync(session: Session, account: InstagramAccount) -> float:
     """Sets the first allowed publication time for a newly connected account."""
     days=account_campaign_sync_delay_days(session,account)
     account.campaign_sync_due_at=account.connected_at+timedelta(days=days)
@@ -633,7 +636,7 @@ async def life(app):
         if "last_insights_error" not in account_columns: connection.exec_driver_sql("ALTER TABLE instagram_accounts ADD COLUMN last_insights_error TEXT NOT NULL DEFAULT ''")
         if "campaign_sync_due_at" not in account_columns: connection.exec_driver_sql("ALTER TABLE instagram_accounts ADD COLUMN campaign_sync_due_at DATETIME")
         if "campaign_sync_completed_at" not in account_columns: connection.exec_driver_sql("ALTER TABLE instagram_accounts ADD COLUMN campaign_sync_completed_at DATETIME")
-        if "posting_delay_days" not in account_columns: connection.exec_driver_sql("ALTER TABLE instagram_accounts ADD COLUMN posting_delay_days INTEGER")
+        if "posting_delay_days" not in account_columns: connection.exec_driver_sql("ALTER TABLE instagram_accounts ADD COLUMN posting_delay_days REAL")
         if "nickname" not in account_columns: connection.exec_driver_sql("ALTER TABLE instagram_accounts ADD COLUMN nickname VARCHAR(120) NOT NULL DEFAULT ''")
         if "account_group" not in account_columns: connection.exec_driver_sql("ALTER TABLE instagram_accounts ADD COLUMN account_group VARCHAR(120) NOT NULL DEFAULT ''")
         if "deleted_at" not in account_columns: connection.exec_driver_sql("ALTER TABLE instagram_accounts ADD COLUMN deleted_at DATETIME")
@@ -841,7 +844,7 @@ def save_account_nickname(account_id:int,body:AccountNicknameIn,s:Session=Depend
 
 class AccountPreferencesIn(BaseModel):
     account_ids: list[int] = Field(min_length=1,max_length=10000)
-    posting_delay_days: int|None = Field(default=None,ge=0,le=365)
+    posting_delay_days: float|None = Field(default=None,ge=0,le=365,allow_inf_nan=False)
     account_group: str = Field(default="",max_length=120)
 
 
@@ -872,8 +875,8 @@ def account_campaign_sync_settings(s:Session=Depends(db)):
     return {"delay_days":account_campaign_sync_delay_days(s)}
 
 @app.put("/api/account-campaign-sync-settings")
-def save_account_campaign_sync_settings(delay_days:int=Body(...,embed=True),s:Session=Depends(db)):
-    if delay_days<0 or delay_days>365: raise HTTPException(422,"Informe entre 0 e 365 dias")
+def save_account_campaign_sync_settings(delay_days:float=Body(...,embed=True,ge=0,le=365,allow_inf_nan=False),s:Session=Depends(db)):
+    if not 0<=delay_days<=365: raise HTTPException(422,"Informe entre 0 e 365 dias")
     item=s.get(ApplicationSetting,"account_campaign_sync_delay_days") or ApplicationSetting(key="account_campaign_sync_delay_days")
     item.value=str(delay_days); s.add(item)
     for account in s.scalars(select(InstagramAccount).where(InstagramAccount.deleted_at.is_(None),InstagramAccount.posting_delay_days.is_(None))):
