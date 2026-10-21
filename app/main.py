@@ -22,7 +22,7 @@ from .services import dirs, copy_media, process, process_slot, process_slots_bat
 from . import meta
 from .tunnel import tunnel
 from .media_gateway import media_app
-from .daily_schedule import daily_quantity, daily_ranges, utc_deadline_local, is_windowed, windowed_ranges, WINDOWED_RULE
+from .daily_schedule import daily_quantity, daily_ranges, utc_deadline_local, is_windowed, is_recurring, windowed_ranges, RECURRING_WINDOWED_RULE
 from .insight_reset import include_after_reset
 from .processing_order import order_pending_jobs
 from .account_errors import account_access_failed
@@ -33,6 +33,7 @@ import uvicorn
 # loop do servidor web.
 account_sync_threads:set[int]=set()
 account_sync_threads_lock=threading.Lock()
+schedule_materialization_lock=threading.Lock()
 
 def db():
     s=DbSession()
@@ -93,7 +94,9 @@ def parse_intervals(values: list[str]):
 
 def ranges_for_day(values: list[str], current: date, now: datetime, not_before: datetime|None=None,
                    campaign_id:int=0, account_id:int=0):
-    if is_windowed(values): return windowed_ranges(current,now,not_before,campaign_id,account_id)
+    if is_windowed(values):
+        horizon=now+timedelta(hours=24) if is_recurring(values) else None
+        return windowed_ranges(current,now,not_before,campaign_id,account_id,horizon)
     quantity=daily_quantity(values)
     return daily_ranges(quantity,current,now,not_before) if quantity is not None else parse_intervals(values)
 
@@ -130,8 +133,10 @@ def materialize_missing_schedule_for_account(session: Session, campaign: Campaig
     existing_positions=set(session.scalars(select(ScheduledPost.position).where(ScheduledPost.campaign_id==campaign.id,ScheduledPost.account_id==account.id)))
     previous=session.scalar(select(ScheduledPost.caption).where(ScheduledPost.account_id==account.id,ScheduledPost.campaign_id==campaign.id).order_by(ScheduledPost.scheduled_for.desc()))
     jobs=[]
-    for day_offset in range(rule.days):
-        current=start_date+timedelta(days=day_offset)
+    days=([now.date(),now.date()+timedelta(days=1)] if is_recurring(values)
+          else [start_date+timedelta(days=offset) for offset in range(rule.days)])
+    for current in days:
+        day_offset=(current-start_date).days
         for range_index,(low,high) in enumerate(ranges_for_day(values,current,now,not_before,campaign.id,account.id)):
             position=(day_offset*1440+high if is_windowed(values) else
                       day_offset*(1440 if daily_quantity(values) else 1000)+range_index)
@@ -208,7 +213,8 @@ def sync_account_to_active_campaigns(session: Session, account: InstagramAccount
         # O vínculo é curto e persistido antes de iniciar as cópias. Assim a
         # campanha já reconhece a conta, mesmo que o restante leve minutos.
         commit_with_retry(session)
-        count=materialize_missing_schedule_for_account(session,campaign,account,not_before=not_before)
+        with schedule_materialization_lock:
+            count=materialize_missing_schedule_for_account(session,campaign,account,not_before=not_before)
         commit_with_retry(session)
         audit(session,"ACCOUNT_ADDED",f"Conta adicionada automaticamente; {count} agendamento(s) futuro(s) criado(s).",campaign.id,account.id)
         commit_with_retry(session)
@@ -243,11 +249,13 @@ def estimated_account_sync_slots(session:Session, account:InstagramAccount) -> i
         except ValueError: continue
         try: start=date.fromisoformat(rule.start_date)
         except ValueError: continue
-        for offset in range(rule.days):
-            current=start+timedelta(days=offset)
+        values=rule.intervals.split(",")
+        days=([now.date(),now.date()+timedelta(days=1)] if is_recurring(values)
+              else [start+timedelta(days=offset) for offset in range(rule.days)])
+        for current in days:
             if current<now.date(): continue
             deadline=utc_deadline_local(account.campaign_sync_due_at)
-            for low,high in ranges_for_day(rule.intervals.split(","),current,now,deadline,campaign.id,account.id):
+            for low,high in ranges_for_day(values,current,now,deadline,campaign.id,account.id):
                 when=datetime.combine(current,time())+timedelta(minutes=low)
                 if when>now and (not deadline or when>=deadline): total+=1
     return total
@@ -604,6 +612,37 @@ async def publish_claimed_post(post_id: int, account_ids_in_flight: set[int], se
     finally:
         if account_id is not None: account_ids_in_flight.discard(account_id)
 
+def refill_recurring_campaigns():
+    """Keep the next 24 hours ready for each eligible account in an active campaign."""
+    with DbSession() as session:
+        campaigns=list(session.scalars(select(Campaign).where(Campaign.status==CampaignStatus.ACTIVE)))
+        for campaign in campaigns:
+            rule=session.scalar(select(CampaignScheduleRule).where(CampaignScheduleRule.campaign_id==campaign.id))
+            if not rule or not is_recurring(rule.intervals.split(",")): continue
+            account_ids=list(session.scalars(select(CampaignAccount.account_id).where(CampaignAccount.campaign_id==campaign.id)))
+            for account_id in account_ids:
+                account=session.get(InstagramAccount,account_id)
+                if not account or not account_is_eligible(account): continue
+                try:
+                    with schedule_materialization_lock:
+                        materialize_missing_schedule_for_account(session,campaign,account,account.campaign_sync_due_at)
+                    commit_with_retry(session)
+                except Exception:
+                    session.rollback()
+                    audit(session,"RECURRING_REFILL_FAILED","A reposição da agenda falhou; nova tentativa na próxima rodada.",campaign.id,account_id)
+                    commit_with_retry(session)
+
+
+async def recurring_schedule_refill():
+    while True:
+        try:
+            await asyncio.to_thread(refill_recurring_campaigns)
+        except Exception:
+            # A publicação continua; a próxima rodada tentará repor a agenda.
+            pass
+        await asyncio.sleep(300)
+
+
 async def scheduler():
     """Publication queue: independent from processing and safe across restarts."""
     semaphore=asyncio.Semaphore(max(1,settings.scheduler_parallelism)); in_flight_accounts:set[int]=set(); tasks:set[asyncio.Task]=set()
@@ -677,12 +716,13 @@ async def life(app):
     media_task=asyncio.create_task(media_server.serve())
     await tunnel.start()
     task=asyncio.create_task(scheduler())
+    recurring_task=asyncio.create_task(recurring_schedule_refill())
     insights_task=asyncio.create_task(insights_scheduler())
     account_health_task=asyncio.create_task(account_health_scheduler())
     try:
         yield
     finally:
-        task.cancel(); insights_task.cancel(); account_health_task.cancel(); media_server.should_exit=True; media_task.cancel(); await tunnel.stop()
+        task.cancel(); recurring_task.cancel(); insights_task.cancel(); account_health_task.cancel(); media_server.should_exit=True; media_task.cancel(); await tunnel.stop()
 app=FastAPI(title="Reels Automation Manager", lifespan=life)
 app.add_middleware(
     CORSMiddleware,
@@ -706,6 +746,8 @@ class CampaignIn(BaseModel): name:str; description:str=""; timezone:str="America
 class QuantityScheduleIn(BaseModel):
     intervals:list[str]=[]
     reels_per_day:int|None=Field(default=None,ge=1,le=1440)
+    start_date:date|None=None
+    days:int|None=None
 
     @model_validator(mode="after")
     def normalize_quantity(self):
@@ -715,14 +757,17 @@ class QuantityScheduleIn(BaseModel):
             self.intervals=[f"daily:{self.reels_per_day}"]
         elif daily_quantity(self.intervals) is not None:
             self.reels_per_day=daily_quantity(self.intervals)
+        if is_recurring(self.intervals):
+            self.start_date=self.start_date or date.today()
+            self.days=2
         return self
 
 
-class CampaignSetupIn(QuantityScheduleIn): account_ids:list[int]=[]; source_ids:list[int]; script_ids:list[int]; start_date:date; days:int; strategy:str="sequential"; cover_path:str=""; caption_list_id:int|None=None; caption_text:str=""
+class CampaignSetupIn(QuantityScheduleIn): account_ids:list[int]=[]; source_ids:list[int]; script_ids:list[int]; strategy:str="sequential"; cover_path:str=""; caption_list_id:int|None=None; caption_text:str=""
 class ProcessIn(BaseModel): source_ids:list[int]
 class ScheduleIn(BaseModel): account_id:int; processed_media_id:int; caption:str=""; scheduled_for:datetime; position:int=0
-class GenerateScheduleIn(QuantityScheduleIn): start_date:date; days:int; strategy:str="sequential"
-class CampaignDefaultsIn(QuantityScheduleIn): intervals:list[str]=[WINDOWED_RULE]; days:int=7; strategy:str="sequential"; script_ids:list[int]=[]; cover_path:str=""; caption_list_id:int|None=None; caption_text:str=""
+class GenerateScheduleIn(QuantityScheduleIn): strategy:str="sequential"
+class CampaignDefaultsIn(QuantityScheduleIn): intervals:list[str]=[RECURRING_WINDOWED_RULE]; strategy:str="sequential"; script_ids:list[int]=[]; cover_path:str=""; caption_list_id:int|None=None; caption_text:str=""
 class LoginIn(BaseModel): email:str; password:str
 
 def progress_file(campaign_id:int) -> Path:
@@ -1342,7 +1387,7 @@ def campaign_defaults(s:Session=Depends(db)):
     return payload
 @app.put("/api/campaign-defaults")
 def save_campaign_defaults(body:CampaignDefaultsIn,s:Session=Depends(db)):
-    if body.days<1 or body.days>366 or not body.intervals: raise HTTPException(422,"Informe os dias e ao menos um intervalo")
+    if not body.days or body.days<1 or body.days>366 or not body.intervals: raise HTTPException(422,"Informe os dias e ao menos um intervalo")
     item=s.get(ApplicationSetting,"campaign_defaults") or ApplicationSetting(key="campaign_defaults")
     item.value=body.model_dump_json(); s.add(item); s.commit()
     payload=body.model_dump(); payload["cover_name"]=Path(payload["cover_path"]).name if payload.get("cover_path") else ""
@@ -1356,7 +1401,7 @@ def campaigns(s:Session=Depends(db)):
     result=[]
     for x in s.scalars(select(Campaign)):
         rule=s.scalar(select(CampaignScheduleRule).where(CampaignScheduleRule.campaign_id==x.id))
-        result.append({"id":x.id,"nome":x.name,"status":x.status,"progress":load_generation_progress(x.id),"cover_path":x.cover_path,"caption_list_id":x.caption_list_id,"caption_text":x.caption_text,"script_ids":list(s.scalars(select(CampaignScript.script_id).where(CampaignScript.campaign_id==x.id).order_by(CampaignScript.position))),"account_ids":list(s.scalars(select(CampaignAccount.account_id).where(CampaignAccount.campaign_id==x.id))),"source_ids":list(s.scalars(select(CampaignSourceMedia.media_id).where(CampaignSourceMedia.campaign_id==x.id))),"schedule":{"start_date":rule.start_date,"days":rule.days,"intervals":rule.intervals.split(","),"reels_per_day":daily_quantity(rule.intervals.split(",")),"strategy":rule.strategy} if rule else None})
+        result.append({"id":x.id,"nome":x.name,"status":x.status,"progress":load_generation_progress(x.id),"cover_path":x.cover_path,"caption_list_id":x.caption_list_id,"caption_text":x.caption_text,"script_ids":list(s.scalars(select(CampaignScript.script_id).where(CampaignScript.campaign_id==x.id).order_by(CampaignScript.position))),"account_ids":list(s.scalars(select(CampaignAccount.account_id).where(CampaignAccount.campaign_id==x.id))),"source_ids":list(s.scalars(select(CampaignSourceMedia.media_id).where(CampaignSourceMedia.campaign_id==x.id))),"schedule":{"start_date":None if is_recurring(rule.intervals.split(",")) else rule.start_date,"days":None if is_recurring(rule.intervals.split(",")) else rule.days,"recurring":is_recurring(rule.intervals.split(",")),"intervals":rule.intervals.split(","),"reels_per_day":daily_quantity(rule.intervals.split(",")),"strategy":rule.strategy} if rule else None})
     return result
 @app.get("/api/campaigns/{campaign_id}/progress")
 def campaign_progress(campaign_id:int,s:Session=Depends(db)):
@@ -1402,7 +1447,7 @@ def setup_campaign(campaign_id:int, body:CampaignSetupIn, s:Session=Depends(db))
     if not accounts: raise HTTPException(422,"Não há contas saudáveis e aptas a publicar. Reconecte e valide uma conta antes de criar a campanha.")
     if len(sources)!=len(set(body.source_ids)): raise HTTPException(422,"Selecione mídias originais disponíveis")
     if len(scripts)!=len(set(body.script_ids)): raise HTTPException(422,"Selecione scripts ativos")
-    if body.days<1 or not body.intervals: raise HTTPException(422,"Informe os dias e ao menos um intervalo")
+    if not body.start_date or not body.days or body.days<1 or not body.intervals: raise HTTPException(422,"Informe os dias e ao menos um intervalo")
     s.execute(delete(CampaignAccount).where(CampaignAccount.campaign_id==c.id)); s.execute(delete(CampaignSourceMedia).where(CampaignSourceMedia.campaign_id==c.id)); s.execute(delete(CampaignScript).where(CampaignScript.campaign_id==c.id))
     if body.cover_path and not data_path(body.cover_path).is_file(): raise HTTPException(422,"A capa selecionada não existe")
     if body.caption_list_id and not s.get(CaptionList,body.caption_list_id): raise HTTPException(422,"A lista de legendas selecionada não existe")
@@ -1425,11 +1470,15 @@ def schedule(campaign_id:int,body:ScheduleIn,s:Session=Depends(db)):
 @app.post("/api/campaigns/{campaign_id}/generate-schedule")
 def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(db),background_claim:bool=False):
     c=s.get(Campaign,campaign_id)
+    if is_recurring(body.intervals):
+        rule=s.scalar(select(CampaignScheduleRule).where(CampaignScheduleRule.campaign_id==campaign_id))
+        if rule and is_recurring(rule.intervals.split(",")):
+            body.start_date=date.fromisoformat(rule.start_date)
     # The background endpoint reserves the campaign as PROCESSING before this worker starts.
     if background_claim and c and c.status==CampaignStatus.PROCESSING:
         c.status=CampaignStatus.READY_TO_SCHEDULE; s.commit()
     if not c or c.status not in (CampaignStatus.DRAFT,CampaignStatus.PROCESSING_FAILED,CampaignStatus.READY_TO_SCHEDULE): raise HTTPException(409,"Esta campanha não pode gerar uma nova agenda agora")
-    if body.days<1 or body.days>366 or not body.intervals: raise HTTPException(422,"Informe dias e ao menos um intervalo")
+    if not body.start_date or not body.days or body.days<1 or body.days>366 or not body.intervals: raise HTTPException(422,"Informe dias e ao menos um intervalo")
     accounts=list(s.scalars(select(CampaignAccount.account_id).where(CampaignAccount.campaign_id==campaign_id)))
     # New accounts are linked right away, while this timestamp protects the
     # beginning of their schedule during the configured onboarding delay.
@@ -1477,8 +1526,10 @@ def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(
         ordered=sources[:]
         if body.strategy=="random": random.shuffle(ordered)
         index=0; position=0; previous_caption_by_account={}; jobs=[]
-        for day_offset in range(body.days):
-            current=body.start_date+timedelta(days=day_offset)
+        current_days=([date.today(),date.today()+timedelta(days=1)] if is_recurring(body.intervals)
+                      else [body.start_date+timedelta(days=offset) for offset in range(body.days)])
+        for current in current_days:
+            day_offset=(current-body.start_date).days
             if current<date.today(): continue
             occurrences=([(account_id,low,high) for account_id in accounts
                 for low,high in ranges_for_day(body.intervals,current,datetime.now(),account_not_before.get(account_id),campaign_id,account_id)]
@@ -1503,7 +1554,8 @@ def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(
                     choices=[text for text in caption_items if text!=previous_caption_by_account.get(account_id)] or caption_items
                     caption=random.choice(choices); previous_caption_by_account[account_id]=caption
                 else: caption=""
-                jobs.append({"slot_key":f"slot-{uuid.uuid4().hex}","source_id":source_id,"account_id":account_id,"current":current,"low":delayed_low,"high":high,"caption":caption})
+                jobs.append({"slot_key":f"slot-{uuid.uuid4().hex}","source_id":source_id,"account_id":account_id,"current":current,"low":delayed_low,"high":high,"caption":caption,
+                             "stable_position":day_offset*1440+high if is_recurring(body.intervals) else None})
         order_pending_jobs(jobs)
         first_pending=0; scheduled=0
         encoded_jobs=[{**job,"current":job["current"].isoformat()} for job in jobs]
@@ -1553,7 +1605,7 @@ def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(
                 if minute is None or not effective_low<=minute<=job["high"]:
                     minute=random.randint(effective_low,job["high"])
                 when=datetime.combine(job["current"],time())+timedelta(minutes=minute)
-                post=ScheduledPost(campaign_id=campaign_id,account_id=job["account_id"],processed_media_id=media.id,caption=job["caption"],scheduled_for=when,position=position)
+                post=ScheduledPost(campaign_id=campaign_id,account_id=job["account_id"],processed_media_id=media.id,caption=job["caption"],scheduled_for=when,position=job.get("stable_position") if job.get("stable_position") is not None else position)
                 s.add(post); s.flush()
                 if cover_data:
                     cover=ProcessedCover(campaign_id=campaign_id,original_media_id=job["source_id"],post_id=post.id,relative_path=cover_data[0],sha256=cover_data[1])
@@ -1644,13 +1696,15 @@ def start_generation(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(d
     campaign=s.get(Campaign,campaign_id)
     allowed=(CampaignStatus.DRAFT,CampaignStatus.PROCESSING_FAILED,CampaignStatus.READY_TO_SCHEDULE)
     if not campaign or campaign.status not in allowed: raise HTTPException(409,"Campaign is already processing or cannot be scheduled")
-    if body.days<1 or body.days>366 or not body.intervals: raise HTTPException(422,"Inform days and at least one interval")
+    if not body.start_date or not body.days or body.days<1 or body.days>366 or not body.intervals: raise HTTPException(422,"Inform days and at least one interval")
     account_count=s.scalar(select(func.count()).select_from(CampaignAccount).where(CampaignAccount.campaign_id==campaign_id)) or 0
     old_plan=s.get(ApplicationSetting,f"generation-plan-{campaign_id}")
     if old_plan: s.delete(old_plan)
     campaign.status=CampaignStatus.PROCESSING; s.commit()
     threading.Thread(target=run_schedule_background,args=(campaign_id,body),daemon=True,name=f"schedule-{campaign_id}").start()
-    return {"accepted":True,"status":CampaignStatus.PROCESSING,"count":account_count*body.days*(54 if is_windowed(body.intervals) else body.reels_per_day or len(body.intervals))}
+    estimated_per_account=(54 if is_recurring(body.intervals) else
+                           body.days*(54 if is_windowed(body.intervals) else body.reels_per_day or len(body.intervals)))
+    return {"accepted":True,"status":CampaignStatus.PROCESSING,"count":account_count*estimated_per_account}
 @app.post("/api/campaigns/{campaign_id}/activate")
 def activate(campaign_id:int,s:Session=Depends(db)):
     c=s.get(Campaign,campaign_id)

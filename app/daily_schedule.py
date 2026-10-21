@@ -4,17 +4,23 @@ from zoneinfo import ZoneInfo
 import random
 
 WINDOWED_RULE = "windows:12-18"
+RECURRING_WINDOWED_RULE = "recurring:windows:12-18"
 POSTING_WINDOWS = ((8 * 60 + 30, 9 * 60 + 30),
                    (11 * 60 + 30, 12 * 60 + 30),
                    (17 * 60 + 30, 18 * 60 + 30))
 
 
 def is_windowed(values: list[str]) -> bool:
-    return values == [WINDOWED_RULE]
+    return values in ([WINDOWED_RULE], [RECURRING_WINDOWED_RULE])
+
+
+def is_recurring(values: list[str]) -> bool:
+    return values == [RECURRING_WINDOWED_RULE]
 
 
 def windowed_ranges(current: date, now: datetime, not_before: datetime | None,
-                    campaign_id: int, account_id: int) -> list[tuple[int, int]]:
+                    campaign_id: int, account_id: int,
+                    horizon: datetime | None = None) -> list[tuple[int, int]]:
     """One stable 12–18 draw per window, prorated to available whole minutes."""
     day_start = datetime.combine(current, time())
     earliest = max(now + timedelta(minutes=5), not_before or day_start)
@@ -25,7 +31,7 @@ def windowed_ranges(current: date, now: datetime, not_before: datetime | None,
         for i in range(draw):
             low = start + i * 60 // draw
             high = start + (i + 1) * 60 // draw - 1
-            if high >= first_minute:
+            if high >= first_minute and (horizon is None or day_start + timedelta(minutes=high) < horizon):
                 result.append((max(low, first_minute), high))
     return result
 

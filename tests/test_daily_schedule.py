@@ -4,10 +4,20 @@ from pathlib import Path
 import unittest
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
-from app.daily_schedule import daily_quantity, daily_ranges, utc_deadline_local, windowed_ranges, is_windowed
+from app.daily_schedule import daily_quantity, daily_ranges, utc_deadline_local, windowed_ranges, is_windowed, is_recurring
 
 
 class DailyScheduleTests(unittest.TestCase):
+    def test_recurring_horizon_uses_only_full_buckets_inside_24_hours(self):
+        day=date(2030,1,2)
+        now=datetime(2030,1,2,12)
+        today=windowed_ranges(day,now,None,1,2,now+timedelta(hours=24))
+        tomorrow=windowed_ranges(day+timedelta(days=1),now,None,1,2,now+timedelta(hours=24))
+        self.assertTrue(today)
+        self.assertTrue(tomorrow)
+        self.assertTrue(all(high<12*60 for _,high in tomorrow))
+        self.assertEqual(tomorrow,windowed_ranges(day+timedelta(days=1),now,None,1,2,now+timedelta(hours=24)))
+
     def test_windowed_full_day_and_mid_window_entry(self):
         day = date(2030, 1, 2)
         full = windowed_ranges(day, datetime(2030, 1, 1), None, 1, 2)
@@ -63,8 +73,8 @@ class QuantityContractTests(unittest.TestCase):
         names={'QuantityScheduleIn','GenerateScheduleIn','CampaignSetupIn','CampaignDefaultsIn'}
         nodes=[node for node in tree.body if isinstance(node,ast.ClassDef) and node.name in names]
         cls.namespace=dict(BaseModel=BaseModel,Field=Field,model_validator=model_validator,
-                           daily_quantity=daily_quantity,is_windowed=is_windowed,
-                           WINDOWED_RULE='windows:12-18',date=date)
+                           daily_quantity=daily_quantity,is_windowed=is_windowed,is_recurring=is_recurring,
+                           RECURRING_WINDOWED_RULE='recurring:windows:12-18',date=date)
         exec(compile(ast.Module(body=nodes,type_ignores=[]),'contracts','exec'),cls.namespace)
 
     def test_new_quantity_survives_checkpoint_roundtrip(self):
@@ -87,6 +97,14 @@ class QuantityContractTests(unittest.TestCase):
         request=model(start_date='2030-01-02',days=2,intervals=['windows:12-18'])
         self.assertIsNone(request.reels_per_day)
         self.assertEqual(model(**request.model_dump()).intervals,['windows:12-18'])
+
+    def test_recurring_rule_needs_no_date_and_keeps_anchor_on_recovery(self):
+        model=self.namespace['GenerateScheduleIn']
+        request=model(intervals=['recurring:windows:12-18'])
+        self.assertIsNotNone(request.start_date)
+        self.assertEqual(request.days,2)
+        self.assertEqual(model(**request.model_dump()).start_date,request.start_date)
+        self.assertIsNone(request.reels_per_day)
 
     def test_invalid_quantity_is_rejected(self):
         for value in (0,-1,1441,1.5):

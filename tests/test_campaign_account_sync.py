@@ -2,6 +2,7 @@ import tempfile
 import unittest
 import sys
 import asyncio
+import uuid
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -84,6 +85,47 @@ class CampaignAccountSyncTests(unittest.TestCase):
             main.materialize_missing_schedule_for_account(session,campaign,account); session.commit()
             after=session.scalar(select(__import__('sqlalchemy').func.count()).select_from(ScheduledPost))
             self.assertEqual(before,after)
+
+    def test_recurring_schedule_refills_24_hours_after_saved_day(self):
+        with self.Session() as session:
+            campaign,account=self.seed(session,days=1)
+            rule=session.scalar(select(CampaignScheduleRule).where(CampaignScheduleRule.campaign_id==campaign.id))
+            rule.start_date=str(date.today()-timedelta(days=3))
+            rule.intervals='recurring:windows:12-18'
+            session.commit()
+            def fake_process(_session,_campaign_id,jobs):
+                outputs=[]
+                for job in jobs:
+                    filename=f'{uuid.uuid4().hex}.mp4'
+                    path=self.test_settings.data_dir/'media/processed'/filename
+                    path.write_bytes(b'processed')
+                    media=Media(original_name=filename,stored_name=filename,
+                        relative_path=f'media/processed/{filename}',kind='processed',
+                        extension='.mp4',size=9,sha256='c'*64,
+                        original_media_id=job['source_id'])
+                    outputs.append((job,media,None))
+                return outputs
+            before=datetime.now()
+            with patch.object(main,'process_slots_batch',side_effect=fake_process):
+                created=main.materialize_missing_schedule_for_account(session,campaign,account)
+                again=main.materialize_missing_schedule_for_account(session,campaign,account)
+            posts=list(session.scalars(select(ScheduledPost)))
+            self.assertGreater(created,0)
+            self.assertEqual(again,0)
+            self.assertEqual(len(posts),created)
+            self.assertTrue(all(before<post.scheduled_for<before+timedelta(hours=24,minutes=1) for post in posts))
+            self.assertTrue(all(post.position>=3*1440 for post in posts))
+
+    def test_recurring_refill_worker_selects_active_linked_account(self):
+        with self.Session() as session:
+            campaign,account=self.seed(session,days=1)
+            rule=session.scalar(select(CampaignScheduleRule).where(CampaignScheduleRule.campaign_id==campaign.id))
+            rule.intervals='recurring:windows:12-18'
+            session.add(CampaignAccount(campaign_id=campaign.id,account_id=account.id))
+            session.commit()
+        with patch.object(main,'DbSession',self.Session),patch.object(main,'materialize_missing_schedule_for_account',return_value=0) as materialize:
+            main.refill_recurring_campaigns()
+        materialize.assert_called_once()
 
     def test_sync_processes_original_video_and_cover_for_each_post(self):
         with self.Session() as session:

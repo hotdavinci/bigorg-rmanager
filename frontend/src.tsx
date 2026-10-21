@@ -83,22 +83,7 @@ const statusLabel = (status: string) =>
     CANCELLED: "CANCELADO",
     PAUSED: "PAUSADO",
   })[status] || status;
-const defaultCampaignName = (
-  start: string,
-  days: number,
-) => {
-  const first = new Date(`${start}T12:00:00`);
-  const last = new Date(first);
-  last.setDate(last.getDate() + Math.max(1, days) - 1);
-  const fmt = (value: Date) =>
-    `${String(value.getDate()).padStart(2, "0")}/${String(value.getMonth() + 1).padStart(2, "0")}`;
-  return `${fmt(first)}-${fmt(last)} · 12–18 Reels por janela`;
-};
-const campaignEndDate = (start: string, days: number) => {
-  const end = new Date(`${start}T12:00:00`);
-  end.setDate(end.getDate() + Math.max(1, days) - 1);
-  return end.toLocaleDateString("pt-BR");
-};
+const defaultCampaignName = () => "Campanha contínua · 12–18 Reels por janela";
 const agendaDateKey = (value: Date) =>
   `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
 
@@ -139,8 +124,7 @@ function App() {
   const [captionListId, setCaptionListId] = useState<number | null>(null);
   const [captionText, setCaptionText] = useState("");
   const [defaults, setDefaults] = useState<any>({
-    intervals: ["windows:12-18"],
-    days: 7,
+    intervals: ["recurring:windows:12-18"],
     strategy: "sequential",
     script_ids: [],
     cover_path: "",
@@ -166,29 +150,19 @@ function App() {
   const [scheduleModal, setScheduleModal] = useState<any>(null);
   const [deleteModal, setDeleteModal] = useState<any>(null);
   const [selectedMedia, setSelectedMedia] = useState<number[]>([]);
-  const [scheduleStart, setScheduleStart] = useState(localDate());
-  const [scheduleDays, setScheduleDays] = useState("7");
-
   const [scheduleStrategy, setScheduleStrategy] = useState("sequential");
-  const [reelsPerDay, setReelsPerDay] = useState("1");
   const setCampaignOpen = (open: boolean) => {
     if (open) {
-      const quantity = Number(defaults.reels_per_day || defaults.intervals?.length || 1);
       const models = defaults.script_ids || [];
-      const days = Number(defaults.days || 7);
-      const start = localDate();
       setSetupAccounts([]);
       setSetupMedia([]);
       setSetupScripts(models);
-      setScheduleStart(start);
-      setReelsPerDay(String(quantity));
-      setScheduleDays(String(days));
       setScheduleStrategy(defaults.strategy || "sequential");
       setCoverPath(defaults.cover_path || "");
       setCoverName(defaults.cover_path ? "Capa padrão selecionada" : "");
       setCaptionListId(defaults.caption_list_id || null);
       setCaptionText(defaults.caption_text || "");
-      setCampaignName(defaultCampaignName(start, days));
+      setCampaignName(defaultCampaignName());
       setCampaignDescription(
         "Usará automaticamente todas as contas saudáveis e aptas a publicar.",
       );
@@ -304,13 +278,8 @@ function App() {
   }, [page]);
   useEffect(() => {
     if (campaignOpen)
-      setCampaignName(
-        defaultCampaignName(
-          scheduleStart,
-          Number(scheduleDays) || 1,
-        ),
-      );
-  }, [campaignOpen, scheduleStart, scheduleDays]);
+      setCampaignName(defaultCampaignName());
+  }, [campaignOpen]);
   const importMedia = async (event: React.ChangeEvent<HTMLInputElement>) => {
     if (!event.target.files?.length) return;
     const data = new FormData();
@@ -398,8 +367,7 @@ function App() {
     if (
       !name ||
       !setupMedia.length ||
-      !setupScripts.length ||
-      !scheduleStart || Number(scheduleDays) < 1
+      !setupScripts.length
     ) {
       setNotice(
         "Preencha o nome, a data, os dias e selecione mídias e scripts.",
@@ -425,9 +393,7 @@ function App() {
         body: JSON.stringify({
           source_ids: setupMedia,
           script_ids: setupScripts,
-          start_date: scheduleStart,
-          days: Number(scheduleDays),
-          intervals: ["windows:12-18"],
+          intervals: ["recurring:windows:12-18"],
           strategy: scheduleStrategy,
           cover_path: coverPath,
           caption_list_id: captionListId,
@@ -440,9 +406,7 @@ function App() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            start_date: scheduleStart,
-            days: Number(scheduleDays),
-            intervals: ["windows:12-18"],
+            intervals: ["recurring:windows:12-18"],
             strategy: scheduleStrategy,
           }),
         },
@@ -477,9 +441,6 @@ function App() {
     setCoverName(campaign.cover_path ? "Capa selecionada" : "");
     setCaptionListId(campaign.caption_list_id || null);
     setCaptionText(campaign.caption_text || "");
-    setScheduleStart(campaign.schedule?.start_date || localDate());
-    setScheduleDays(String(campaign.schedule?.days || 7));
-    setReelsPerDay(String(campaign.schedule?.reels_per_day || campaign.schedule?.intervals?.length || 1));
     setScheduleStrategy(campaign.schedule?.strategy || "sequential");
   };
   const toggle = (
@@ -501,9 +462,7 @@ function App() {
     }
     try {
       const body = {
-        start_date: scheduleStart,
-        days: Number(scheduleDays),
-        intervals: ["windows:12-18"],
+        intervals: ["recurring:windows:12-18"],
         strategy: scheduleStrategy,
       };
       await api(`/campaigns/${setupCampaign.id}/setup`, {
@@ -679,8 +638,6 @@ function App() {
     setSetupAccounts([]);
     setSetupMedia([]);
     setSetupScripts(defaults.script_ids || []);
-    setReelsPerDay(String(defaults.reels_per_day || defaults.intervals?.length || 1));
-    setScheduleDays(String(defaults.days || 7));
     setScheduleStrategy(defaults.strategy || "sequential");
     setCoverPath(defaults.cover_path || "");
     setCoverName(defaults.cover_path ? "Capa padrão selecionada" : "");
@@ -691,8 +648,7 @@ function App() {
   const saveDefaults = async () => {
     try {
       const payload = {
-        intervals: ["windows:12-18"],
-        days: Number(defaults.days || 7),
+        intervals: ["recurring:windows:12-18"],
         strategy: defaults.strategy || "sequential",
         script_ids: defaults.script_ids || [],
         cover_path: defaults.cover_path || "",
@@ -752,17 +708,13 @@ function App() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            start_date: scheduleStart,
-            days: Number(scheduleDays),
-            intervals: ["windows:12-18"],
+            intervals: ["recurring:windows:12-18"],
             strategy: scheduleStrategy,
           }),
         },
       );
       setScheduleModal(null);
-      setNotice(
-        `${result.count} publicações agendadas com mídias processadas.`,
-      );
+      setNotice(`Preparação contínua iniciada para até ${result.count} posts nas próximas 24 horas.`);
       refresh();
     } catch (error: any) {
       setNotice(error.message);
@@ -779,9 +731,9 @@ function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(campaign.schedule),
       });
-      setNotice(
-        `${result.count} publicações agendadas. Cada intervalo gerou um post por dia e por conta.`,
-      );
+      setNotice(campaign.schedule.recurring
+        ? `Preparação contínua iniciada para até ${result.count} posts nas próximas 24 horas.`
+        : `Preparação iniciada para até ${result.count} posts da regra salva.`);
       refresh();
     } catch (error: any) {
       setNotice(error.message);
@@ -849,13 +801,7 @@ function App() {
     return (
       <ScheduleDialog
         campaign={scheduleModal}
-        start={scheduleStart}
-        days={scheduleDays}
-        reelsPerDay={reelsPerDay}
         strategy={scheduleStrategy}
-        setStart={setScheduleStart}
-        setDays={setScheduleDays}
-        setReelsPerDay={setReelsPerDay}
         setStrategy={setScheduleStrategy}
         cancel={() => setScheduleModal(null)}
         submit={scheduleCampaign}
@@ -1219,18 +1165,6 @@ function App() {
               </div>
               <div className="defaults-grid">
                 <label>
-                  Dias
-                  <input
-                    type="number"
-                    min="1"
-                    max="366"
-                    value={defaults.days || 7}
-                    onChange={(e) =>
-                      setDefaults({ ...defaults, days: Number(e.target.value) })
-                    }
-                  />
-                </label>
-                <label>
                   Seleção das mídias
                   <select
                     value={defaults.strategy || "sequential"}
@@ -1244,7 +1178,7 @@ function App() {
                 </label>
                 <label className="full-width">
                   Horários por conta
-                  <small>08:30–09:30, 11:30–12:30 e 17:30–18:30. De 12 a 18 Reels em cada janela completa; entrada durante a janela reduz a quantidade proporcionalmente.</small>
+                  <small>Campanha contínua. Mantém as próximas 24 horas agendadas nas janelas 08:30–09:30, 11:30–12:30 e 17:30–18:30; de 12 a 18 Reels por janela completa.</small>
                 </label>
                 <label>
                   Lista JSON padrão
@@ -1500,12 +1434,6 @@ function App() {
           selectedScripts={setupScripts}
           setScripts={setSetupScripts}
           importScript={importScript}
-          start={scheduleStart}
-          setStart={setScheduleStart}
-          days={scheduleDays}
-          setDays={setScheduleDays}
-          reelsPerDay={reelsPerDay}
-          setReelsPerDay={setReelsPerDay}
           strategy={scheduleStrategy}
           setStrategy={setScheduleStrategy}
           coverPath={coverPath}
@@ -1539,12 +1467,6 @@ function App() {
           selectedScripts={setupScripts}
           setScripts={setSetupScripts}
           importScript={importScript}
-          start={scheduleStart}
-          setStart={setScheduleStart}
-          days={scheduleDays}
-          setDays={setScheduleDays}
-          reelsPerDay={reelsPerDay}
-          setReelsPerDay={setReelsPerDay}
           strategy={scheduleStrategy}
           setStrategy={setScheduleStrategy}
           coverPath={coverPath}
@@ -2760,30 +2682,7 @@ function CampaignDialog(p: any) {
               />
             </label>
             <h3>Agendamento</h3>
-            <div className="schedule-grid">
-              <label>
-                Começar em
-                <input
-                  type="date"
-                  value={p.start}
-                  onChange={(e: any) => p.setStart(e.target.value)}
-                />
-              </label>
-              <label>
-                Quantidade de dias
-                <input
-                  type="number"
-                  min="1"
-                  max="366"
-                  value={p.days}
-                  onChange={(e: any) => p.setDays(e.target.value)}
-                />
-                <small className="campaign-end-date">
-                  Dia final:{" "}
-                  <b>{campaignEndDate(p.start, Number(p.days) || 1)}</b>
-                </small>
-              </label>
-            </div>
+            <p>Campanha recorrente: as próximas 24 horas são preparadas continuamente.</p>
             <label>
               Seleção das mídias
               <select
@@ -2814,13 +2713,7 @@ function CampaignDialog(p: any) {
 }
 function ScheduleDialog({
   campaign,
-  start,
-  days,
-  reelsPerDay,
   strategy,
-  setStart,
-  setDays,
-  setReelsPerDay,
   setStrategy,
   cancel,
   submit,
@@ -2835,26 +2728,7 @@ function ScheduleDialog({
           </button>
         </div>
         <p>Somente vídeos já processados serão usados.</p>
-        <div className="schedule-grid">
-          <label>
-            Começar em
-            <input
-              type="date"
-              value={start}
-              onChange={(e) => setStart(e.target.value)}
-            />
-          </label>
-          <label>
-            Quantidade de dias
-            <input
-              type="number"
-              min="1"
-              max="366"
-              value={days}
-              onChange={(e) => setDays(e.target.value)}
-            />
-          </label>
-        </div>
+        <p>Campanha recorrente: as próximas 24 horas serão preparadas continuamente.</p>
         <label>
           Horários por conta
           <small>08:30–09:30, 11:30–12:30 e 17:30–18:30. De 12 a 18 Reels por janela completa.</small>
