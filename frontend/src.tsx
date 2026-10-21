@@ -86,14 +86,13 @@ const statusLabel = (status: string) =>
 const defaultCampaignName = (
   start: string,
   days: number,
-  reelsPerDay: number,
 ) => {
   const first = new Date(`${start}T12:00:00`);
   const last = new Date(first);
   last.setDate(last.getDate() + Math.max(1, days) - 1);
   const fmt = (value: Date) =>
     `${String(value.getDate()).padStart(2, "0")}/${String(value.getMonth() + 1).padStart(2, "0")}`;
-  return `${fmt(first)}-${fmt(last)} · ${reelsPerDay} Reels/dia por conta`;
+  return `${fmt(first)}-${fmt(last)} · 12–18 Reels por janela`;
 };
 const campaignEndDate = (start: string, days: number) => {
   const end = new Date(`${start}T12:00:00`);
@@ -140,7 +139,7 @@ function App() {
   const [captionListId, setCaptionListId] = useState<number | null>(null);
   const [captionText, setCaptionText] = useState("");
   const [defaults, setDefaults] = useState<any>({
-    intervals: ["11:00-13:00"],
+    intervals: ["windows:12-18"],
     days: 7,
     strategy: "sequential",
     script_ids: [],
@@ -148,7 +147,7 @@ function App() {
     caption_list_id: null,
     caption_text: "",
   });
-  const [accountSyncDelay, setAccountSyncDelay] = useState(1);
+  const [accountSyncDelay, setAccountSyncDelay] = useState(0);
   const [coverPath, setCoverPath] = useState("");
   const [coverName, setCoverName] = useState("");
   const [tunnel, setTunnel] = useState<any>({});
@@ -189,7 +188,7 @@ function App() {
       setCoverName(defaults.cover_path ? "Capa padrão selecionada" : "");
       setCaptionListId(defaults.caption_list_id || null);
       setCaptionText(defaults.caption_text || "");
-      setCampaignName(defaultCampaignName(start, days, quantity));
+      setCampaignName(defaultCampaignName(start, days));
       setCampaignDescription(
         "Usará automaticamente todas as contas saudáveis e aptas a publicar.",
       );
@@ -309,10 +308,9 @@ function App() {
         defaultCampaignName(
           scheduleStart,
           Number(scheduleDays) || 1,
-          Number(reelsPerDay) || 1,
         ),
       );
-  }, [campaignOpen, scheduleStart, scheduleDays, reelsPerDay]);
+  }, [campaignOpen, scheduleStart, scheduleDays]);
   const importMedia = async (event: React.ChangeEvent<HTMLInputElement>) => {
     if (!event.target.files?.length) return;
     const data = new FormData();
@@ -401,10 +399,10 @@ function App() {
       !name ||
       !setupMedia.length ||
       !setupScripts.length ||
-      (!Number.isInteger(Number(reelsPerDay)) || Number(reelsPerDay) < 1 || Number(reelsPerDay) > 1440)
+      !scheduleStart || Number(scheduleDays) < 1
     ) {
       setNotice(
-        "Preencha o nome e selecione mídias, scripts e uma quantidade válida de Reels.",
+        "Preencha o nome, a data, os dias e selecione mídias e scripts.",
       );
       return;
     }
@@ -429,7 +427,7 @@ function App() {
           script_ids: setupScripts,
           start_date: scheduleStart,
           days: Number(scheduleDays),
-          reels_per_day: Number(reelsPerDay),
+          intervals: ["windows:12-18"],
           strategy: scheduleStrategy,
           cover_path: coverPath,
           caption_list_id: captionListId,
@@ -444,7 +442,7 @@ function App() {
           body: JSON.stringify({
             start_date: scheduleStart,
             days: Number(scheduleDays),
-            reels_per_day: Number(reelsPerDay),
+            intervals: ["windows:12-18"],
             strategy: scheduleStrategy,
           }),
         },
@@ -497,15 +495,15 @@ function App() {
   const saveSetup = async (event: FormEvent) => {
     event.preventDefault();
     if (!setupCampaign) return;
-    if (!setupMedia.length || !setupScripts.length || (!Number.isInteger(Number(reelsPerDay)) || Number(reelsPerDay) < 1 || Number(reelsPerDay) > 1440)) {
-      setNotice("Selecione mídias, scripts e uma quantidade válida de Reels.");
+    if (!setupMedia.length || !setupScripts.length) {
+      setNotice("Selecione mídias e scripts para a campanha.");
       return;
     }
     try {
       const body = {
         start_date: scheduleStart,
         days: Number(scheduleDays),
-        reels_per_day: Number(reelsPerDay),
+        intervals: ["windows:12-18"],
         strategy: scheduleStrategy,
       };
       await api(`/campaigns/${setupCampaign.id}/setup`, {
@@ -693,7 +691,7 @@ function App() {
   const saveDefaults = async () => {
     try {
       const payload = {
-        reels_per_day: Number(defaults.reels_per_day || defaults.intervals?.length || 1),
+        intervals: ["windows:12-18"],
         days: Number(defaults.days || 7),
         strategy: defaults.strategy || "sequential",
         script_ids: defaults.script_ids || [],
@@ -701,8 +699,6 @@ function App() {
         caption_list_id: defaults.caption_list_id || null,
         caption_text: defaults.caption_text || "",
       };
-      if (!Number.isInteger(payload.reels_per_day) || payload.reels_per_day < 1 || payload.reels_per_day > 1440)
-        throw new Error("Informe uma quantidade válida de Reels padrão.");
       const saved = await api("/campaign-defaults", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -758,7 +754,7 @@ function App() {
           body: JSON.stringify({
             start_date: scheduleStart,
             days: Number(scheduleDays),
-            reels_per_day: Number(reelsPerDay),
+            intervals: ["windows:12-18"],
             strategy: scheduleStrategy,
           }),
         },
@@ -1247,12 +1243,8 @@ function App() {
                   </select>
                 </label>
                 <label className="full-width">
-                  Reels por dia e por conta
-                  <input type="number" min="1" max="1440" required
-                    value={defaults.reels_per_day ?? defaults.intervals?.length ?? 1}
-                    onChange={(e) => setDefaults({ ...defaults, reels_per_day: e.target.value })}
-                  />
-                  <small>Distribuição automática durante as 24 horas.</small>
+                  Horários por conta
+                  <small>08:30–09:30, 11:30–12:30 e 17:30–18:30. De 12 a 18 Reels em cada janela completa; entrada durante a janela reduz a quantidade proporcionalmente.</small>
                 </label>
                 <label>
                   Lista JSON padrão
@@ -2805,12 +2797,8 @@ function CampaignDialog(p: any) {
               </select>
             </label>
             <label>
-              Reels por dia e por conta
-              <input type="number" min="1" max="1440" required
-                value={p.reelsPerDay}
-                onChange={(e: any) => p.setReelsPerDay(e.target.value)}
-              />
-              <small>Distribuídos automaticamente nas 24 horas. No primeiro dia, usamos o tempo restante após a preparação e a liberação da conta.</small>
+              Horários por conta
+              <small>08:30–09:30, 11:30–12:30 e 17:30–18:30. De 12 a 18 Reels por janela completa; a entrada durante uma janela usa apenas o tempo restante.</small>
             </label>
           </section>
         </div>
@@ -2868,10 +2856,8 @@ function ScheduleDialog({
           </label>
         </div>
         <label>
-          Reels por dia e por conta
-          <input type="number" min="1" max="1440" required value={reelsPerDay}
-            onChange={(e) => setReelsPerDay(e.target.value)} />
-          <small>Distribuição automática durante as 24 horas.</small>
+          Horários por conta
+          <small>08:30–09:30, 11:30–12:30 e 17:30–18:30. De 12 a 18 Reels por janela completa.</small>
         </label>
         <label>
           Escolha das mídias

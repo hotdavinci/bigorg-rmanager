@@ -4,10 +4,28 @@ from pathlib import Path
 import unittest
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
-from app.daily_schedule import daily_quantity, daily_ranges, utc_deadline_local
+from app.daily_schedule import daily_quantity, daily_ranges, utc_deadline_local, windowed_ranges, is_windowed
 
 
 class DailyScheduleTests(unittest.TestCase):
+    def test_windowed_full_day_and_mid_window_entry(self):
+        day = date(2030, 1, 2)
+        full = windowed_ranges(day, datetime(2030, 1, 1), None, 1, 2)
+        self.assertEqual(len(full), len(set(full)))
+        self.assertTrue(36 <= len(full) <= 54)
+        for start, end in ((510, 570), (690, 750), (1050, 1110)):
+            self.assertTrue(12 <= len([r for r in full if start <= r[0] < end]) <= 18)
+        partial = windowed_ranges(day, datetime(2030, 1, 2, 11, 55),
+                                  datetime(2030, 1, 2, 12), 1, 2)
+        midday_full = [r for r in full if 690 <= r[0] < 750]
+        midday_partial = [r for r in partial if 690 <= r[0] < 750]
+        self.assertTrue(5 <= len(midday_partial) <= 9)
+        self.assertTrue(all(low >= 12 * 60 for low, _ in midday_partial))
+        self.assertEqual([high for _, high in midday_partial],
+                         [high for _, high in midday_full if high >= 12 * 60])
+        self.assertEqual([r for r in partial if r[0] >= 1050],
+                         [r for r in full if r[0] >= 1050])
+
     def test_full_day_is_partitioned_without_overlap(self):
         day = date(2030, 1, 2)
         ranges = daily_ranges(12, day, datetime(2030, 1, 1, 12))
@@ -45,7 +63,8 @@ class QuantityContractTests(unittest.TestCase):
         names={'QuantityScheduleIn','GenerateScheduleIn','CampaignSetupIn','CampaignDefaultsIn'}
         nodes=[node for node in tree.body if isinstance(node,ast.ClassDef) and node.name in names]
         cls.namespace=dict(BaseModel=BaseModel,Field=Field,model_validator=model_validator,
-                           daily_quantity=daily_quantity,date=date)
+                           daily_quantity=daily_quantity,is_windowed=is_windowed,
+                           WINDOWED_RULE='windows:12-18',date=date)
         exec(compile(ast.Module(body=nodes,type_ignores=[]),'contracts','exec'),cls.namespace)
 
     def test_new_quantity_survives_checkpoint_roundtrip(self):
@@ -62,6 +81,12 @@ class QuantityContractTests(unittest.TestCase):
     def test_persisted_rule_marker_is_recognized_on_recovery(self):
         request=self.namespace['GenerateScheduleIn'](start_date='2030-01-02',days=1,intervals=['daily:17'])
         self.assertEqual(request.reels_per_day,17)
+
+    def test_window_rule_survives_checkpoint_roundtrip(self):
+        model=self.namespace['GenerateScheduleIn']
+        request=model(start_date='2030-01-02',days=2,intervals=['windows:12-18'])
+        self.assertIsNone(request.reels_per_day)
+        self.assertEqual(model(**request.model_dump()).intervals,['windows:12-18'])
 
     def test_invalid_quantity_is_rejected(self):
         for value in (0,-1,1441,1.5):

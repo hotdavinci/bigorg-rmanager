@@ -1,6 +1,33 @@
 """Daily quantities encoded alongside legacy interval rules; no data migration."""
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
+import random
+
+WINDOWED_RULE = "windows:12-18"
+POSTING_WINDOWS = ((8 * 60 + 30, 9 * 60 + 30),
+                   (11 * 60 + 30, 12 * 60 + 30),
+                   (17 * 60 + 30, 18 * 60 + 30))
+
+
+def is_windowed(values: list[str]) -> bool:
+    return values == [WINDOWED_RULE]
+
+
+def windowed_ranges(current: date, now: datetime, not_before: datetime | None,
+                    campaign_id: int, account_id: int) -> list[tuple[int, int]]:
+    """One stable 12–18 draw per window, prorated to available whole minutes."""
+    day_start = datetime.combine(current, time())
+    earliest = max(now + timedelta(minutes=5), not_before or day_start)
+    first_minute = max(0, int(-(-(earliest - day_start).total_seconds() // 60)))
+    result = []
+    for window_index, (start, end) in enumerate(POSTING_WINDOWS):
+        draw = random.Random(f"window:{campaign_id}:{account_id}:{current}:{window_index}").randint(12, 18)
+        for i in range(draw):
+            low = start + i * 60 // draw
+            high = start + (i + 1) * 60 // draw - 1
+            if high >= first_minute:
+                result.append((max(low, first_minute), high))
+    return result
 
 
 def daily_quantity(values: list[str]) -> int | None:
