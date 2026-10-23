@@ -22,7 +22,7 @@ from .services import dirs, copy_media, process, process_slot, process_slots_bat
 from . import meta
 from .tunnel import tunnel
 from .media_gateway import media_app
-from .daily_schedule import daily_quantity, daily_ranges, utc_deadline_local, is_windowed, is_recurring, windowed_ranges, RECURRING_WINDOWED_RULE
+from .daily_schedule import daily_quantity, daily_ranges, utc_deadline_local, is_windowed, is_recurring, windowed_ranges, window_specs, RECURRING_WINDOWED_RULE
 from .insight_reset import include_after_reset
 from .processing_order import order_pending_jobs
 from .account_errors import account_access_failed
@@ -44,6 +44,11 @@ def account_is_eligible(account: InstagramAccount, now: datetime|None=None) -> b
     """One conservative definition used by the UI, setup and scheduler."""
     now=now or datetime.utcnow()
     return bool(not account.deleted_at and account.active and account.encrypted_token and account.last_verified_at and not (account.last_error or "").strip() and (not account.token_expires_at or account.token_expires_at>now))
+
+def campaign_allows_account(session: Session, campaign_id: int, account: InstagramAccount) -> bool:
+    """An optional stored group scope limits links created by setup and OAuth sync."""
+    scope=session.get(ApplicationSetting,f"campaign-account-group-{campaign_id}")
+    return scope is None or (account.account_group or "").strip().casefold()==scope.value.strip().casefold()
 
 def is_definitive_account_error(error: Exception) -> bool:
     return account_access_failed(error,verification=True)
@@ -78,7 +83,7 @@ def cancel_account_from_active_campaigns(session: Session, account: InstagramAcc
     return cancelled
 
 def parse_intervals(values: list[str]):
-    if is_windowed(values): return [(510,570),(690,750),(1050,1110)]
+    if is_windowed(values): return [(start,end) for start,end,_,_ in window_specs(values)]
     quantity=daily_quantity(values)
     if quantity is not None:
         return [(i*1440//quantity,(i+1)*1440//quantity-1) for i in range(quantity)]
@@ -96,7 +101,7 @@ def ranges_for_day(values: list[str], current: date, now: datetime, not_before: 
                    campaign_id:int=0, account_id:int=0):
     if is_windowed(values):
         horizon=now+timedelta(hours=24) if is_recurring(values) else None
-        return windowed_ranges(current,now,not_before,campaign_id,account_id,horizon)
+        return windowed_ranges(current,now,not_before,campaign_id,account_id,horizon,values)
     quantity=daily_quantity(values)
     return daily_ranges(quantity,current,now,not_before) if quantity is not None else parse_intervals(values)
 
@@ -205,6 +210,7 @@ def sync_account_to_active_campaigns(session: Session, account: InstagramAccount
     """Links a valid account once and materializes only still-allowed future slots."""
     added=created=0
     for campaign in session.scalars(select(Campaign).where(Campaign.status==CampaignStatus.ACTIVE)):
+        if not campaign_allows_account(session,campaign.id,account): continue
         linked=session.scalar(select(CampaignAccount).where(CampaignAccount.campaign_id==campaign.id,CampaignAccount.account_id==account.id))
         if linked: continue
         exclusion=session.scalar(select(CampaignAccountExclusion).where(CampaignAccountExclusion.campaign_id==campaign.id,CampaignAccountExclusion.account_id==account.id))
@@ -242,6 +248,7 @@ def estimated_account_sync_slots(session:Session, account:InstagramAccount) -> i
     """A contagem é apenas para o painel, sem criar nenhum post ainda."""
     total=0; now=datetime.now()
     for campaign in session.scalars(select(Campaign).where(Campaign.status==CampaignStatus.ACTIVE)):
+        if not campaign_allows_account(session,campaign.id,account): continue
         if session.scalar(select(CampaignAccount).where(CampaignAccount.campaign_id==campaign.id,CampaignAccount.account_id==account.id)): continue
         rule=session.scalar(select(CampaignScheduleRule).where(CampaignScheduleRule.campaign_id==campaign.id))
         if not rule: continue
@@ -752,6 +759,7 @@ class QuantityScheduleIn(BaseModel):
     @model_validator(mode="after")
     def normalize_quantity(self):
         if is_windowed(self.intervals):
+            window_specs(self.intervals)
             self.reels_per_day=None
         elif self.reels_per_day is not None:
             self.intervals=[f"daily:{self.reels_per_day}"]
@@ -1178,6 +1186,7 @@ def cached_insight_thumbnail(reel_id:int,s:Session=Depends(db)):
     reel=s.get(InstagramReel,reel_id)
     if not reel or not reel.cached_thumbnail_path: raise HTTPException(404,"Miniatura salva não encontrada")
     target=data_path(reel.cached_thumbnail_path)
+    s.close()
     if not target.is_file(): raise HTTPException(404,"Arquivo de miniatura não encontrado")
     return FileResponse(target,media_type="image/jpeg",headers={"Cache-Control":"private, max-age=86400"})
 
@@ -1186,6 +1195,7 @@ def cached_insight_video(reel_id:int,s:Session=Depends(db)):
     reel=s.get(InstagramReel,reel_id)
     if not reel or not reel.cached_video_path: raise HTTPException(404,"Vídeo salvo não encontrado")
     target=data_path(reel.cached_video_path)
+    s.close()
     if not target.is_file(): raise HTTPException(404,"Arquivo de vídeo não encontrado")
     media_type="video/quicktime" if target.suffix.lower()==".mov" else "video/mp4"
     return FileResponse(target,media_type=media_type,headers={"Cache-Control":"private, max-age=86400"})
@@ -1295,7 +1305,9 @@ def stream_original_media(media_id:int,s:Session=Depends(db)):
     path=data_path(item.relative_path)
     if not path.is_file(): raise HTTPException(404,"O arquivo original não existe mais")
     media_type="video/mp4" if item.extension.lower()==".mp4" else "video/quicktime"
-    return FileResponse(path,media_type=media_type,filename=item.original_name)
+    filename=item.original_name
+    s.close()
+    return FileResponse(path,media_type=media_type,filename=filename)
 @app.delete("/api/media/{media_id}")
 def remove_media(media_id:int,s:Session=Depends(db)):
     item=s.get(Media,media_id)
@@ -1441,7 +1453,7 @@ def setup_campaign(campaign_id:int, body:CampaignSetupIn, s:Session=Depends(db))
     if not c or c.status not in (CampaignStatus.DRAFT,CampaignStatus.PROCESSING_FAILED,CampaignStatus.READY_TO_SCHEDULE): raise HTTPException(409,"Esta campanha não pode ser alterada agora")
     # Campaigns always start with every account that was successfully checked and
     # is publishable. `account_ids` remains accepted only for old clients.
-    accounts=[account for account in s.scalars(select(InstagramAccount)).all() if account_is_eligible(account)]
+    accounts=[account for account in s.scalars(select(InstagramAccount)).all() if account_is_eligible(account) and campaign_allows_account(s,c.id,account)]
     sources=list(s.scalars(select(Media).where(Media.id.in_(body.source_ids),Media.kind=="original")))
     scripts=list(s.scalars(select(Script).where(Script.id.in_(body.script_ids),Script.active==True)))
     if not accounts: raise HTTPException(422,"Não há contas saudáveis e aptas a publicar. Reconecte e valide uma conta antes de criar a campanha.")
@@ -1702,8 +1714,8 @@ def start_generation(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(d
     if old_plan: s.delete(old_plan)
     campaign.status=CampaignStatus.PROCESSING; s.commit()
     threading.Thread(target=run_schedule_background,args=(campaign_id,body),daemon=True,name=f"schedule-{campaign_id}").start()
-    estimated_per_account=(54 if is_recurring(body.intervals) else
-                           body.days*(54 if is_windowed(body.intervals) else body.reels_per_day or len(body.intervals)))
+    estimated_per_account=(sum(maximum for _,_,_,maximum in window_specs(body.intervals)) if is_recurring(body.intervals) else
+                           body.days*(sum(maximum for _,_,_,maximum in window_specs(body.intervals)) if is_windowed(body.intervals) else body.reels_per_day or len(body.intervals)))
     return {"accepted":True,"status":CampaignStatus.PROCESSING,"count":account_count*estimated_per_account}
 @app.post("/api/campaigns/{campaign_id}/activate")
 def activate(campaign_id:int,s:Session=Depends(db)):

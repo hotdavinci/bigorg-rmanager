@@ -4,10 +4,34 @@ from pathlib import Path
 import unittest
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
-from app.daily_schedule import daily_quantity, daily_ranges, utc_deadline_local, windowed_ranges, is_windowed, is_recurring
+from app.daily_schedule import daily_quantity, daily_ranges, utc_deadline_local, windowed_ranges, window_specs, is_windowed, is_recurring
 
 
 class DailyScheduleTests(unittest.TestCase):
+    def test_custom_windows_keep_counts_and_partial_entry(self):
+        rules=['recurring:window:08:00-09:00:3-3','recurring:window:11:30-12:30:6-6']
+        day=date(2030,1,2)
+        full=windowed_ranges(day,datetime(2030,1,1),None,7,8,values=rules)
+        self.assertEqual(len(full),9)
+        self.assertEqual(len([1 for low,_ in full if 480<=low<540]),3)
+        self.assertEqual(len([1 for low,_ in full if 690<=low<750]),6)
+        partial=windowed_ranges(day,datetime(2030,1,2,12),None,7,8,values=rules)
+        self.assertEqual(len(partial),3)
+        self.assertTrue(all(low>=725 for low,_ in partial))
+        tomorrow=windowed_ranges(day+timedelta(days=1),datetime(2030,1,2,12),None,7,8,
+                                 datetime(2030,1,3,12),rules)
+        self.assertEqual(len(tomorrow),6)
+        self.assertTrue(all(high<720 for _,high in tomorrow))
+
+    def test_custom_windows_reject_overlap_and_impossible_count(self):
+        for rules in (
+            ['recurring:window:08:00-09:00:3-3','recurring:window:08:59-10:00:3-3'],
+            ['recurring:window:08:00-08:10:1-11'],
+            ['recurring:window:23:30-00:30:1-3'],
+        ):
+            with self.subTest(rules=rules), self.assertRaises(ValueError):
+                window_specs(rules)
+
     def test_recurring_horizon_uses_only_full_buckets_inside_24_hours(self):
         day=date(2030,1,2)
         now=datetime(2030,1,2,12)
@@ -17,6 +41,11 @@ class DailyScheduleTests(unittest.TestCase):
         self.assertTrue(tomorrow)
         self.assertTrue(all(high<12*60 for _,high in tomorrow))
         self.assertEqual(tomorrow,windowed_ranges(day+timedelta(days=1),now,None,1,2,now+timedelta(hours=24)))
+        later=now+timedelta(minutes=10)
+        tomorrow_later=windowed_ranges(day+timedelta(days=1),later,None,1,2,later+timedelta(hours=24))
+        self.assertTrue(any(12*60<=high<12*60+10 for _,high in tomorrow_later))
+        self.assertTrue(all(high<12*60+10 for _,high in tomorrow_later))
+        self.assertTrue(set(tomorrow).issubset(tomorrow_later))
 
     def test_windowed_full_day_and_mid_window_entry(self):
         day = date(2030, 1, 2)
@@ -73,7 +102,7 @@ class QuantityContractTests(unittest.TestCase):
         names={'QuantityScheduleIn','GenerateScheduleIn','CampaignSetupIn','CampaignDefaultsIn'}
         nodes=[node for node in tree.body if isinstance(node,ast.ClassDef) and node.name in names]
         cls.namespace=dict(BaseModel=BaseModel,Field=Field,model_validator=model_validator,
-                           daily_quantity=daily_quantity,is_windowed=is_windowed,is_recurring=is_recurring,
+                           daily_quantity=daily_quantity,is_windowed=is_windowed,is_recurring=is_recurring,window_specs=window_specs,
                            RECURRING_WINDOWED_RULE='recurring:windows:12-18',date=date)
         exec(compile(ast.Module(body=nodes,type_ignores=[]),'contracts','exec'),cls.namespace)
 
@@ -105,6 +134,16 @@ class QuantityContractTests(unittest.TestCase):
         self.assertEqual(request.days,2)
         self.assertEqual(model(**request.model_dump()).start_date,request.start_date)
         self.assertIsNone(request.reels_per_day)
+
+    def test_custom_recurring_rule_validates_contract(self):
+        model=self.namespace['GenerateScheduleIn']
+        rules=['recurring:window:08:00-09:00:3-3','recurring:window:11:30-12:30:6-8']
+        request=model(intervals=rules)
+        self.assertEqual(request.intervals,rules)
+        self.assertIsNotNone(request.start_date)
+        self.assertEqual(request.days,2)
+        with self.assertRaises(ValidationError):
+            model(intervals=['recurring:window:08:00-08:10:1-11'])
 
     def test_invalid_quantity_is_rejected(self):
         for value in (0,-1,1441,1.5):

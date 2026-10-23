@@ -83,7 +83,40 @@ const statusLabel = (status: string) =>
     CANCELLED: "CANCELADO",
     PAUSED: "PAUSADO",
   })[status] || status;
-const defaultCampaignName = () => "Campanha contínua · 12–18 Reels por janela";
+const defaultCampaignName = () => "Campanha contínua";
+type PostingWindow = { start: string; end: string; min: number; max: number };
+const initialWindows: PostingWindow[] = [
+  { start: "08:30", end: "09:30", min: 12, max: 18 },
+  { start: "11:30", end: "12:30", min: 12, max: 18 },
+  { start: "17:30", end: "18:30", min: 12, max: 18 },
+];
+const parseWindows = (rules?: string[]): PostingWindow[] => {
+  if (!rules?.length || rules[0] === "recurring:windows:12-18" || rules[0] === "windows:12-18")
+    return initialWindows.map((window) => ({ ...window }));
+  const parsed = rules.map((rule) => /^recurring:window:(\d{2}:\d{2})-(\d{2}:\d{2}):(\d+)-(\d+)$/.exec(rule));
+  return parsed.every(Boolean)
+    ? parsed.map((match) => ({ start: match![1], end: match![2], min: Number(match![3]), max: Number(match![4]) }))
+    : initialWindows.map((window) => ({ ...window }));
+};
+const encodeWindows = (windows: PostingWindow[]): string[] => {
+  if (!windows.length || windows.length > 24) throw new Error("Configure entre 1 e 24 intervalos.");
+  const ordered = [...windows].sort((a, b) => a.start.localeCompare(b.start));
+  for (let i = 0; i < ordered.length; i++) {
+    const window = ordered[i];
+    const time = (value: string) => {
+      if (!/^\d{2}:\d{2}$/.test(value)) throw new Error("Informe horários válidos.");
+      const [hour, minute] = value.split(":").map(Number);
+      if (hour > 23 || minute > 59) throw new Error("Informe horários válidos.");
+      return hour * 60 + minute;
+    };
+    const start = time(window.start), end = time(window.end);
+    if (end <= start) throw new Error("O fim do intervalo deve ser posterior ao início no mesmo dia.");
+    if (!Number.isInteger(window.min) || !Number.isInteger(window.max) || window.min < 1 || window.max < window.min || window.max > end - start)
+      throw new Error("A quantidade mínima e máxima deve caber no intervalo.");
+    if (i && window.start < ordered[i - 1].end) throw new Error("Os intervalos não podem se sobrepor.");
+  }
+  return ordered.map((window) => `recurring:window:${window.start}-${window.end}:${window.min}-${window.max}`);
+};
 const agendaDateKey = (value: Date) =>
   `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
 
@@ -151,6 +184,9 @@ function App() {
   const [deleteModal, setDeleteModal] = useState<any>(null);
   const [selectedMedia, setSelectedMedia] = useState<number[]>([]);
   const [scheduleStrategy, setScheduleStrategy] = useState("sequential");
+  const [postingWindows, setPostingWindows] = useState<PostingWindow[]>(parseWindows());
+  const [defaultWindows, setDefaultWindows] = useState<PostingWindow[]>(parseWindows());
+  useEffect(() => setDefaultWindows(parseWindows(defaults.intervals)), [defaults.intervals]);
   const setCampaignOpen = (open: boolean) => {
     if (open) {
       const models = defaults.script_ids || [];
@@ -158,6 +194,7 @@ function App() {
       setSetupMedia([]);
       setSetupScripts(models);
       setScheduleStrategy(defaults.strategy || "sequential");
+      setPostingWindows(parseWindows(defaults.intervals));
       setCoverPath(defaults.cover_path || "");
       setCoverName(defaults.cover_path ? "Capa padrão selecionada" : "");
       setCaptionListId(defaults.caption_list_id || null);
@@ -393,7 +430,7 @@ function App() {
         body: JSON.stringify({
           source_ids: setupMedia,
           script_ids: setupScripts,
-          intervals: ["recurring:windows:12-18"],
+          intervals: encodeWindows(postingWindows),
           strategy: scheduleStrategy,
           cover_path: coverPath,
           caption_list_id: captionListId,
@@ -406,7 +443,7 @@ function App() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            intervals: ["recurring:windows:12-18"],
+            intervals: encodeWindows(postingWindows),
             strategy: scheduleStrategy,
           }),
         },
@@ -442,6 +479,7 @@ function App() {
     setCaptionListId(campaign.caption_list_id || null);
     setCaptionText(campaign.caption_text || "");
     setScheduleStrategy(campaign.schedule?.strategy || "sequential");
+    setPostingWindows(parseWindows(campaign.schedule?.intervals));
   };
   const toggle = (
     value: number,
@@ -462,7 +500,7 @@ function App() {
     }
     try {
       const body = {
-        intervals: ["recurring:windows:12-18"],
+        intervals: encodeWindows(postingWindows),
         strategy: scheduleStrategy,
       };
       await api(`/campaigns/${setupCampaign.id}/setup`, {
@@ -639,6 +677,7 @@ function App() {
     setSetupMedia([]);
     setSetupScripts(defaults.script_ids || []);
     setScheduleStrategy(defaults.strategy || "sequential");
+    setPostingWindows(parseWindows(defaults.intervals));
     setCoverPath(defaults.cover_path || "");
     setCoverName(defaults.cover_path ? "Capa padrão selecionada" : "");
     setCaptionListId(defaults.caption_list_id || null);
@@ -648,7 +687,7 @@ function App() {
   const saveDefaults = async () => {
     try {
       const payload = {
-        intervals: ["recurring:windows:12-18"],
+        intervals: encodeWindows(defaultWindows),
         strategy: defaults.strategy || "sequential",
         script_ids: defaults.script_ids || [],
         cover_path: defaults.cover_path || "",
@@ -708,7 +747,7 @@ function App() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            intervals: ["recurring:windows:12-18"],
+            intervals: encodeWindows(postingWindows),
             strategy: scheduleStrategy,
           }),
         },
@@ -803,6 +842,8 @@ function App() {
         campaign={scheduleModal}
         strategy={scheduleStrategy}
         setStrategy={setScheduleStrategy}
+        windows={postingWindows}
+        setWindows={setPostingWindows}
         cancel={() => setScheduleModal(null)}
         submit={scheduleCampaign}
       />
@@ -1176,10 +1217,9 @@ function App() {
                     <option value="random">Aleatória</option>
                   </select>
                 </label>
-                <label className="full-width">
-                  Horários por conta
-                  <small>Campanha contínua. Mantém as próximas 24 horas agendadas nas janelas 08:30–09:30, 11:30–12:30 e 17:30–18:30; de 12 a 18 Reels por janela completa.</small>
-                </label>
+                <div className="full-width">
+                  <PostingWindowsEditor windows={defaultWindows} setWindows={setDefaultWindows} />
+                </div>
                 <label>
                   Lista JSON padrão
                   <select
@@ -1436,6 +1476,8 @@ function App() {
           importScript={importScript}
           strategy={scheduleStrategy}
           setStrategy={setScheduleStrategy}
+          windows={postingWindows}
+          setWindows={setPostingWindows}
           coverPath={coverPath}
           coverName={coverName}
           importCover={importCover}
@@ -1469,6 +1511,8 @@ function App() {
           importScript={importScript}
           strategy={scheduleStrategy}
           setStrategy={setScheduleStrategy}
+          windows={postingWindows}
+          setWindows={setPostingWindows}
           coverPath={coverPath}
           coverName={coverName}
           importCover={importCover}
@@ -2537,6 +2581,27 @@ function AccountsPage({
     </div>
   );
 }
+function PostingWindowsEditor({ windows, setWindows }: { windows: PostingWindow[]; setWindows: (windows: PostingWindow[]) => void }) {
+  const update = (index: number, changes: Partial<PostingWindow>) =>
+    setWindows(windows.map((window, position) => position === index ? { ...window, ...changes } : window));
+  return (
+    <div className="posting-windows">
+      <b>Horários por conta</b>
+      <small>Defina as faixas diárias e os Reels mínimos e máximos por conta em cada faixa. A agenda cobre as próximas 24 horas.</small>
+      {windows.map((window, index) => (
+        <div className="posting-window-row" key={index}>
+          <label>Início<input type="time" value={window.start} onChange={(event) => update(index, { start: event.target.value })} required /></label>
+          <label>Fim<input type="time" value={window.end} onChange={(event) => update(index, { end: event.target.value })} required /></label>
+          <label>Mínimo<input type="number" min="1" max="1440" value={window.min} onChange={(event) => update(index, { min: Number(event.target.value) })} required /></label>
+          <label>Máximo<input type="number" min="1" max="1440" value={window.max} onChange={(event) => update(index, { max: Number(event.target.value) })} required /></label>
+          <button type="button" className="secondary" onClick={() => setWindows(windows.filter((_, position) => position !== index))}>Remover</button>
+        </div>
+      ))}
+      <button type="button" className="secondary" onClick={() => setWindows([...windows, { start: "19:00", end: "20:00", min: 12, max: 18 }])}>Adicionar intervalo</button>
+    </div>
+  );
+}
+
 function CampaignDialog(p: any) {
   const toggleItem = (id: number, items: number[], setItems: any) =>
     setItems(
@@ -2695,10 +2760,7 @@ function CampaignDialog(p: any) {
                 <option value="random">Aleatória</option>
               </select>
             </label>
-            <label>
-              Horários por conta
-              <small>08:30–09:30, 11:30–12:30 e 17:30–18:30. De 12 a 18 Reels por janela completa; a entrada durante uma janela usa apenas o tempo restante.</small>
-            </label>
+            <PostingWindowsEditor windows={p.windows} setWindows={p.setWindows} />
           </section>
         </div>
         <div className="modal-actions">
@@ -2715,6 +2777,8 @@ function ScheduleDialog({
   campaign,
   strategy,
   setStrategy,
+  windows,
+  setWindows,
   cancel,
   submit,
 }: any) {
@@ -2729,10 +2793,7 @@ function ScheduleDialog({
         </div>
         <p>Somente vídeos já processados serão usados.</p>
         <p>Campanha recorrente: as próximas 24 horas serão preparadas continuamente.</p>
-        <label>
-          Horários por conta
-          <small>08:30–09:30, 11:30–12:30 e 17:30–18:30. De 12 a 18 Reels por janela completa.</small>
-        </label>
+        <PostingWindowsEditor windows={windows} setWindows={setWindows} />
         <label>
           Escolha das mídias
           <select
