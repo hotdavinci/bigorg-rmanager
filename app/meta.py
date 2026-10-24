@@ -7,11 +7,8 @@ from cryptography.fernet import Fernet, InvalidToken
 import httpx
 import asyncio
 import re
-from contextlib import AsyncExitStack
-from pathlib import Path
 from fastapi import HTTPException
 from .config import settings
-from .publish_proxy import publication_proxy_pool
 
 SCOPES = "instagram_business_basic,instagram_business_manage_messages,instagram_business_manage_comments,instagram_business_content_publish,instagram_business_manage_insights"
 
@@ -54,7 +51,7 @@ def authorization_url(state: str) -> str:
 
 async def exchange_code(code: str) -> tuple[str, datetime|None]:
     require_config()
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
         client_id=settings.meta_instagram_app_id or settings.meta_app_id
         secret=settings.meta_instagram_app_secret or settings.meta_app_secret
         # The Instagram Login token endpoint expects multipart/form-data.  A
@@ -76,7 +73,7 @@ async def exchange_code(code: str) -> tuple[str, datetime|None]:
         return token, (datetime.utcnow()+timedelta(seconds=int(days)) if days else None)
 
 async def profile(token: str) -> dict:
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
         response=await client.get(f"{settings.meta_graph_base_url}/me", params={"fields":"id,user_id,username,name,profile_picture_url", "access_token":token})
         if response.is_error:
             # The caller needs Meta's reason (especially OAuth 190) to decide
@@ -93,7 +90,7 @@ async def reels_with_views(account_id: str, token: str, limit: int=100) -> list[
     never invalidate an otherwise healthy publishing token.
     """
     fields="id,caption,permalink,thumbnail_url,media_url,timestamp,media_type,media_product_type,like_count,comments_count"
-    async with httpx.AsyncClient(timeout=45) as client:
+    async with httpx.AsyncClient(timeout=45, trust_env=False) as client:
         response=await client.get(f"{settings.meta_graph_base_url}/{account_id}/media",params={"fields":fields,"limit":min(max(limit,1),100),"access_token":token})
         if response.is_error: raise RuntimeError(f"Não foi possível listar Reels: {response.text[:500]}")
         reels=[]
@@ -107,7 +104,7 @@ async def reels_with_views(account_id: str, token: str, limit: int=100) -> list[
         return reels
 
 async def publish_reel(account_id: str, token: str, video_url: str, caption: str="", cover_url: str="") -> str:
-    """Publish by URL: optional proxy for POSTs, always direct status polling."""
+    """Publish by URL using direct connections for POSTs and status polling."""
     try:
         return await _publish_reel(account_id, token, video_url, caption, cover_url)
     except httpx.HTTPError as exc:
@@ -117,40 +114,15 @@ async def publish_reel(account_id: str, token: str, video_url: str, caption: str
 
 async def _publish_reel(account_id: str, token: str, video_url: str, caption: str, cover_url: str) -> str:
     version=settings.meta_graph_api_version
-    proxy_url=publication_proxy_pool.for_account(
-        account_id,
-        settings.meta_publish_proxy_urls.get_secret_value(),
-        settings.meta_publish_proxy_url.get_secret_value(),
-        settings.data_dir / "proxy_assignments.sqlite3",
-    )
-    async with AsyncExitStack() as stack:
-        # Ignore ambient HTTP(S)_PROXY/ALL_PROXY so polling stays direct.
-        client=await stack.enter_async_context(httpx.AsyncClient(timeout=120, trust_env=False))
-        post_client=client
-        if proxy_url:
-            try:
-                url=httpx.URL(proxy_url)
-                if url.scheme not in {"http", "https"} or not url.host:
-                    raise ValueError("Unsupported proxy")
-                proxy_client=httpx.AsyncClient(timeout=120, proxy=proxy_url, trust_env=False)
-            except (ValueError, httpx.InvalidURL):
-                raise RuntimeError("META_PUBLISH_PROXY_URL inválida; use http:// ou https:// com host e porta") from None
-            post_client=await stack.enter_async_context(proxy_client)
+    async with httpx.AsyncClient(timeout=120, trust_env=False) as client:
         # Multipart text fields; Meta downloads the binary from video_url.
         fields = {"media_type": (None, "REELS"), "video_url": (None, video_url), "caption": (None, caption), "share_to_feed": (None, "true"), "access_token": (None, token)}
         if cover_url: fields["cover_url"] = (None, cover_url)
-        try:
-            create=await post_client.post(
-                f"{settings.meta_graph_base_url}/v{version}/{account_id}/media",
-                files=fields,
-                headers={"Authorization": f"Bearer {token}"},
-            )
-        except httpx.HTTPError:
-            publication_proxy_pool.connection_failed(proxy_url)
-            raise
-        if proxy_url and create.status_code == 407:
-            publication_proxy_pool.connection_failed(proxy_url)
-            raise RuntimeError("Proxy recusou autenticação na criação do container")
+        create=await client.post(
+            f"{settings.meta_graph_base_url}/v{version}/{account_id}/media",
+            files=fields,
+            headers={"Authorization": f"Bearer {token}"},
+        )
         if create.is_error: raise RuntimeError(f"Meta recusou o container: {create.text[:1000]}")
         container=create.json().get("id")
         if not container: raise RuntimeError("A Meta não retornou o ID do container")
@@ -163,13 +135,6 @@ async def _publish_reel(account_id: str, token: str, video_url: str, caption: st
             if code in {"ERROR","EXPIRED"}: raise RuntimeError(f"A Meta não processou o vídeo: {data}")
             await asyncio.sleep(5)
         else: raise RuntimeError("A Meta demorou demais para processar o vídeo")
-        try:
-            published=await post_client.post(f"{settings.meta_graph_base_url}/v{version}/{account_id}/media_publish",data={"creation_id":container,"access_token":token})
-        except httpx.HTTPError:
-            publication_proxy_pool.connection_failed(proxy_url)
-            raise
-        if proxy_url and published.status_code == 407:
-            publication_proxy_pool.connection_failed(proxy_url)
-            raise RuntimeError("Proxy recusou autenticação ao publicar Reel")
+        published=await client.post(f"{settings.meta_graph_base_url}/v{version}/{account_id}/media_publish",data={"creation_id":container,"access_token":token})
         if published.is_error: raise RuntimeError(f"Falha ao publicar Reel: {published.text[:1000]}")
         return str(published.json().get("id") or container)

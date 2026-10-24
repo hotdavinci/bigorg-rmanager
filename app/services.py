@@ -1,16 +1,24 @@
-import hashlib, shutil, subprocess, uuid, os, time as time_module, threading
+import hashlib, json, shutil, subprocess, uuid, os, time as time_module, threading
 from datetime import datetime
 from pathlib import Path
 from sqlalchemy import select, delete
 from sqlalchemy.exc import OperationalError
 from .config import settings, data_path
-from .models import Media, Campaign, CampaignStatus, ProcessingExecution, Script, CampaignScript, ProcessedCover
+from .models import Media, Campaign, CampaignStatus, ProcessingExecution, Script, CampaignScript, ProcessedCover, ApplicationSetting
 
 MEDIA_EXT={".mp4", ".mov"}; IMAGE_EXT={".jpg", ".jpeg", ".png", ".webp"}
 # A abertura da biblioteca pode pedir dezenas de capas de uma vez. Limitar
 # somente a extração de frames evita saturar a VPS, sem bloquear SQLite ou o
 # scheduler de publicação.
 thumbnail_slots=threading.BoundedSemaphore(2)
+
+def script_command(session, script: Script, local_script: Path) -> list[str]:
+    """Apply stored, narrowly allowed flags to a trusted processing script."""
+    option=session.get(ApplicationSetting,f"script-args-{script.id}")
+    arguments=json.loads(option.value) if option else []
+    if not isinstance(arguments,list) or any(item!="--no-rename" for item in arguments):
+        raise ValueError("Opções do script de processamento inválidas")
+    return [settings.python_executable,local_script.name,*arguments]
 
 def commit_with_retry(session, attempts: int=5):
     """Commits only short SQLite writes; never keep a transaction during FFmpeg."""
@@ -49,7 +57,7 @@ def copy_media(src: Path, original_name: str|None=None):
 def process(session, campaign_id: int, source_ids: list[int]):
     c=session.get(Campaign,campaign_id)
     scripts=list(session.scalars(select(Script).join(CampaignScript, CampaignScript.script_id==Script.id).where(CampaignScript.campaign_id==campaign_id).order_by(CampaignScript.position)))
-    sources=list(session.scalars(select(Media).where(Media.id.in_(source_ids),Media.kind=="original")))
+    sources=list(session.scalars(select(Media).where(Media.id.in_(source_ids),Media.kind=="original",Media.status!="Excluída")))
     cover_source=data_path(c.cover_path) if c and c.cover_path else None
     if not c or not scripts or len(sources)!=len(source_ids) or (cover_source and not cover_source.is_file()): raise ValueError("Campanha, scripts, mídias ou capa não encontrados")
     execution_id=uuid.uuid4().hex; root=settings.data_dir/"workspaces"/str(c.id)/execution_id; c.status=CampaignStatus.PROCESSING; session.commit(); last=None
@@ -62,8 +70,9 @@ def process(session, campaign_id: int, source_ids: list[int]):
             before={p.name:sha(p) for p in work.iterdir() if p.is_file()}
             for script in scripts:
                 script_file=data_path(script.relative_path); local_script=work/script_file.name; shutil.copy2(script_file,local_script)
+                command=script_command(session,script,local_script)
                 e=ProcessingExecution(campaign_id=c.id,script_id=script.id,workspace=str(work.relative_to(settings.data_dir))); session.add(e); session.commit(); last=e
-                run=subprocess.run([settings.python_executable,local_script.name],cwd=work,capture_output=True,text=True,encoding="utf-8",errors="replace",env={**os.environ,"PYTHONIOENCODING":"utf-8"},timeout=settings.processing_timeout_seconds)
+                run=subprocess.run(command,cwd=work,capture_output=True,text=True,encoding="utf-8",errors="replace",env={**os.environ,"PYTHONIOENCODING":"utf-8"},timeout=settings.processing_timeout_seconds)
                 e.stdout=run.stdout[-20000:]; e.stderr=run.stderr[-20000:]; e.exit_code=run.returncode; e.finished_at=datetime.utcnow(); e.status="SUCCESS" if run.returncode==0 else "FAILED"
                 if run.returncode: raise RuntimeError(f"O script {script.name} falhou para {source.original_name}")
             videos=[p for p in work.iterdir() if p.suffix.lower() in MEDIA_EXT and (p.name not in before or sha(p)!=before[p.name])]
@@ -97,10 +106,11 @@ def process_slot(session, campaign_id: int, source_id: int, slot_key: str):
     before={p.name:sha(p) for p in work.iterdir() if p.is_file()}
     for script in scripts:
         script_file=data_path(script.relative_path); local_script=work/script_file.name; shutil.copy2(script_file,local_script)
+        command=script_command(session,script,local_script)
         execution=ProcessingExecution(campaign_id=campaign_id,script_id=script.id,workspace=str(work.relative_to(settings.data_dir)))
         session.add(execution); session.flush()
         try:
-            run=subprocess.run([settings.python_executable,local_script.name],cwd=work,capture_output=True,text=True,encoding="utf-8",errors="replace",env={**os.environ,"PYTHONIOENCODING":"utf-8"},timeout=settings.processing_timeout_seconds)
+            run=subprocess.run(command,cwd=work,capture_output=True,text=True,encoding="utf-8",errors="replace",env={**os.environ,"PYTHONIOENCODING":"utf-8"},timeout=settings.processing_timeout_seconds)
             execution.stdout=run.stdout[-20000:]; execution.stderr=run.stderr[-20000:]; execution.exit_code=run.returncode; execution.finished_at=datetime.utcnow(); execution.status="SUCCESS" if run.returncode==0 else "FAILED"
             if run.returncode: raise RuntimeError(f"O script {script.name} falhou para {source.original_name}")
         except Exception as exc:
@@ -153,18 +163,28 @@ def process_slots_batch(session, campaign_id: int, slots: list[dict]):
         inputs.append({"slot":slot,"source":source,"token":token,"cover_name":cover_name})
     for script in scripts:
         script_file=data_path(script.relative_path); local_script=work/script_file.name; shutil.copy2(script_file,local_script)
+        command=script_command(session,script,local_script)
         execution=ProcessingExecution(campaign_id=campaign_id,script_id=script.id,workspace=str(work.relative_to(settings.data_dir)))
         # Persist and RELEASE the SQLite writer before the user script starts.
         # FFmpeg can run for minutes; holding a transaction here blocks OAuth,
         # cancellation and the publication scheduler.
         session.add(execution); commit_with_retry(session)
         try:
-            run=subprocess.run([settings.python_executable,local_script.name],cwd=work,capture_output=True,text=True,encoding="utf-8",errors="replace",env={**os.environ,"PYTHONIOENCODING":"utf-8"},timeout=settings.processing_timeout_seconds)
+            run=subprocess.run(command,cwd=work,capture_output=True,text=True,encoding="utf-8",errors="replace",env={**os.environ,"PYTHONIOENCODING":"utf-8"},timeout=settings.processing_timeout_seconds)
             execution.stdout=run.stdout[-20000:]; execution.stderr=run.stderr[-20000:]; execution.exit_code=run.returncode; execution.finished_at=datetime.utcnow(); execution.status="SUCCESS" if run.returncode==0 else "FAILED"
             commit_with_retry(session)
-            if run.returncode: raise RuntimeError(f"O script {script.name} falhou no lote")
+            if run.returncode in (-15,-2):
+                raise InterruptedError(f"O script {script.name} foi interrompido pelo encerramento do serviço")
+            if run.returncode:
+                # Alguns scripts relatam a falha em stdout, outros em stderr.
+                # Inclua o motivo no painel, além de manter o log completo.
+                error_lines=[line.strip() for line in run.stdout.splitlines() if "erro" in line.casefold() or "error" in line.casefold()]
+                detail="\n".join(error_lines) or run.stderr.strip() or run.stdout.strip()
+                raise RuntimeError(f"O script {script.name} falhou no lote (código {run.returncode}): {detail[-2000:] or 'sem detalhes no log'}")
         except Exception as exc:
-            execution.status="FAILED"; execution.stderr=(execution.stderr+"\n"+str(exc))[-20000:]; execution.finished_at=datetime.utcnow(); raise
+            execution.status="FAILED"; execution.stderr=(execution.stderr+"\n"+str(exc))[-20000:]; execution.finished_at=datetime.utcnow()
+            commit_with_retry(session)
+            raise
     changed_videos=[p for p in work.iterdir() if p.is_file() and p.suffix.lower() in MEDIA_EXT and (p.name not in before or sha(p)!=before[p.name])]
     changed_covers=[p for p in work.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXT and (p.name not in before or sha(p)!=before[p.name])]
     if len(changed_videos)<len(inputs): raise RuntimeError(f"O lote gerou {len(changed_videos)} vídeos para {len(inputs)} posts")

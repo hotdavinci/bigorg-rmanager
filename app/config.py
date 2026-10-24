@@ -1,7 +1,6 @@
 import os
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, SecretStr
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -17,11 +16,6 @@ class Settings(BaseSettings):
     meta_oauth_authorize_url: str = "https://www.instagram.com/oauth/authorize"
     meta_oauth_token_url: str = "https://api.instagram.com/oauth/access_token"
     meta_graph_base_url: str = "https://graph.instagram.com"
-    # Somente POST de criação/publicação; polling permanece direto.
-    meta_publish_proxy_url: SecretStr = SecretStr("")
-    meta_publish_proxy_urls: SecretStr = SecretStr("")
-    # Legado: aceito para compatibilidade; vínculo atual é fixo por conta.
-    meta_publish_proxy_posts_per_proxy: int = Field(default=10, ge=1)
     python_executable: str = "python"
     processing_timeout_seconds: int = 1800
     # Um lote reduz a quantidade de inícios do Python/ffmpeg, sem encher o disco
@@ -64,8 +58,5 @@ def data_path(relative_path: str | Path) -> Path:
 def reload_runtime_settings() -> None:
     """Rele o .env sem interromper o servidor local."""
     updated = Settings()
-    settings.meta_publish_proxy_url = updated.meta_publish_proxy_url
-    settings.meta_publish_proxy_urls = updated.meta_publish_proxy_urls
-    settings.meta_publish_proxy_posts_per_proxy = updated.meta_publish_proxy_posts_per_proxy
     for field in ("app_encryption_key", "meta_app_id", "meta_instagram_app_id", "meta_instagram_app_secret", "meta_app_secret", "meta_redirect_uri", "meta_graph_api_version", "meta_oauth_authorize_url", "meta_oauth_token_url", "meta_graph_base_url", "python_executable", "processing_timeout_seconds", "processing_batch_size", "scheduler_poll_seconds", "scheduler_parallelism", "scheduler_max_attempts", "scheduler_claim_timeout_seconds", "insights_sync_hours", "insights_reels_limit", "account_health_check_minutes", "admin_email", "admin_password", "campaign_cover_path", "cloudflared_path", "tunnel_media_port", "public_media_base_url", "cors_allowed_origins", "session_https_only"):
         setattr(settings, field, getattr(updated, field))

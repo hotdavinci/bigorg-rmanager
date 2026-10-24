@@ -18,6 +18,7 @@ from sqlalchemy.exc import OperationalError
 from .config import settings, ROOT, reload_runtime_settings, data_path
 from .db import Base, engine, Session as DbSession
 from .models import Media, Script, Campaign, CampaignStatus, ScheduledPost, PostStatus, InstagramAccount, OAuthState, CampaignAccount, CampaignAccountExclusion, SchedulerLock, AuditLog, InstagramReel, InstagramReelSnapshot, CampaignSourceMedia, CampaignScript, ProcessingExecution, CampaignScheduleRule, ProcessedCover, ScheduledPostCover, PublicationAttempt, CaptionList, ApplicationSetting
+from .media_deletion import DELETED_STATUS, cleanup_deleted_original_files, delete_library_media
 from .services import dirs, copy_media, process, process_slot, process_slots_batch, thumbnail, commit_with_retry
 from . import meta
 from .tunnel import tunnel
@@ -350,7 +351,7 @@ async def cache_reel_video(reel: InstagramReel, source_url: str) -> None:
     relative=Path("insights") / "videos" / f"reel-{reel.account_id}-{safe_id}{extension}"
     target=data_path(relative)
     try:
-        async with httpx.AsyncClient(timeout=180, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=180, follow_redirects=True, trust_env=False) as client:
             async with client.stream("GET",source_url) as response:
                 content_type=response.headers.get("content-type", "").lower()
                 if response.status_code!=200 or not content_type.startswith("video/"):
@@ -375,7 +376,7 @@ async def cache_reel_video(reel: InstagramReel, source_url: str) -> None:
     if target.is_file() and reel.cached_thumbnail_path:
         return
     try:
-        async with httpx.AsyncClient(timeout=25, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=25, follow_redirects=True, trust_env=False) as client:
             response=await client.get(source_url)
         content_type=response.headers.get("content-type", "").lower()
         if response.status_code != 200 or not content_type.startswith("image/") or not response.content or len(response.content)>10*1024*1024:
@@ -638,6 +639,7 @@ def refill_recurring_campaigns():
                     session.rollback()
                     audit(session,"RECURRING_REFILL_FAILED","A reposição da agenda falhou; nova tentativa na próxima rodada.",campaign.id,account_id)
                     commit_with_retry(session)
+        cleanup_deleted_original_files(session,settings.data_dir)
 
 
 async def recurring_schedule_refill():
@@ -1279,11 +1281,11 @@ def retry_post_now(post_id:int,s:Session=Depends(db)):
     s.commit(); return {"ok":True}
 @app.get("/api/media")
 def media(kind:str|None=None,s:Session=Depends(db)):
-    q=select(Media); q=q.where(Media.kind==kind) if kind else q
+    q=select(Media).where(Media.status!=DELETED_STATUS); q=q.where(Media.kind==kind) if kind else q
     return [{"id":m.id,"nome":m.original_name,"tipo":m.kind,"status":m.status,"tamanho":m.size,"caminho":m.relative_path,"original_media_id":m.original_media_id,"thumbnail_url":f"/api/media/{m.id}/thumbnail"} for m in s.scalars(q.order_by(Media.created_at.desc()))]
 @app.post("/api/media/refresh-thumbnails")
 def refresh_media_thumbnails(s:Session=Depends(db)):
-    items=list(s.scalars(select(Media).where(Media.kind=="original")))
+    items=list(s.scalars(select(Media).where(Media.kind=="original",Media.status!=DELETED_STATUS)))
     # A geração usa FFmpeg e pode levar segundos por arquivo. Solte o SQLite
     # antes desse trabalho para não prender o painel inteiro.
     s.expunge_all(); s.close()
@@ -1291,7 +1293,7 @@ def refresh_media_thumbnails(s:Session=Depends(db)):
 @app.get("/api/media/{media_id}/thumbnail")
 def media_thumbnail(media_id:int,s:Session=Depends(db)):
     item=s.get(Media,media_id)
-    if not item: raise HTTPException(404,"Mídia não encontrada")
+    if not item or item.status==DELETED_STATUS: raise HTTPException(404,"Mídia não encontrada")
     # Não mantenha uma conexão do pool enquanto o FFmpeg extrai o frame. Abrir
     # a Biblioteca dispara muitos pedidos de miniatura em paralelo.
     s.expunge(item); s.close()
@@ -1301,42 +1303,23 @@ def media_thumbnail(media_id:int,s:Session=Depends(db)):
 @app.get("/api/media/{media_id}/stream")
 def stream_original_media(media_id:int,s:Session=Depends(db)):
     item=s.get(Media,media_id)
-    if not item or item.kind!="original": raise HTTPException(404,"Vídeo original não encontrado")
+    if not item or item.kind!="original" or item.status==DELETED_STATUS: raise HTTPException(404,"Vídeo original não encontrado")
     path=data_path(item.relative_path)
-    if not path.is_file(): raise HTTPException(404,"O arquivo original não existe mais")
-    media_type="video/mp4" if item.extension.lower()==".mp4" else "video/quicktime"
     filename=item.original_name
+    media_type="video/mp4" if item.extension.lower()==".mp4" else "video/quicktime"
     s.close()
+    if not path.is_file(): raise HTTPException(404,"O arquivo original não existe mais")
     return FileResponse(path,media_type=media_type,filename=filename)
 @app.delete("/api/media/{media_id}")
 def remove_media(media_id:int,s:Session=Depends(db)):
     item=s.get(Media,media_id)
-    if not item: raise HTTPException(404,"Mídia não encontrada")
-    if s.scalar(select(func.count()).select_from(CampaignSourceMedia).where(CampaignSourceMedia.media_id==media_id)):
-        raise HTTPException(409,"Remova esta mídia das campanhas antes de excluí-la")
-    if s.scalar(select(func.count()).select_from(ScheduledPost).where(ScheduledPost.processed_media_id==media_id,ScheduledPost.status.in_([PostStatus.PENDING,PostStatus.CLAIMED,PostStatus.UPLOADING]))):
-        raise HTTPException(409,"Esta mídia está em uma publicação pendente")
-    data_path(item.relative_path).unlink(missing_ok=True)
-    (settings.data_dir/"media/thumbnails"/f"{item.sha256}.jpg").unlink(missing_ok=True)
-    s.delete(item); s.commit(); return {"ok":True}
+    if not item or item.kind!="original" or item.status==DELETED_STATUS:
+        raise HTTPException(404,"Mídia original não encontrada")
+    return {"ok":True,**delete_library_media(s,[media_id],settings.data_dir)}
 @app.delete("/api/media")
 def remove_media_bulk(media_ids:list[int]=Body(...),s:Session=Depends(db)):
-    ids=list(dict.fromkeys(media_ids))
-    if not ids: raise HTTPException(400,"Select at least one media file")
-    deleted=[]; skipped=[]; files=[]
-    active_statuses=[PostStatus.PENDING,PostStatus.CLAIMED,PostStatus.UPLOADING,PostStatus.WAITING_META,PostStatus.PUBLISHING]
-    for media_id in ids:
-        item=s.get(Media,media_id)
-        if not item: skipped.append({"id":media_id,"reason":"Media not found"}); continue
-        in_campaign=s.scalar(select(func.count()).select_from(CampaignSourceMedia).where(CampaignSourceMedia.media_id==media_id))
-        in_post=s.scalar(select(func.count()).select_from(ScheduledPost).where(ScheduledPost.processed_media_id==media_id,ScheduledPost.status.in_(active_statuses)))
-        if in_campaign or in_post:
-            skipped.append({"id":media_id,"reason":"Protected by a campaign or pending post"}); continue
-        files.extend([data_path(item.relative_path),settings.data_dir/"media/thumbnails"/f"{item.sha256}.jpg"])
-        s.delete(item); deleted.append(media_id)
-    s.commit()
-    for file in files: file.unlink(missing_ok=True)
-    return {"deleted":deleted,"skipped":skipped}
+    if not media_ids: raise HTTPException(400,"Selecione ao menos uma mídia")
+    return delete_library_media(s,media_ids,settings.data_dir)
 @app.post("/api/media/import")
 async def import_media(files:list[UploadFile]=File(...),s:Session=Depends(db)):
     result=[]
@@ -1454,7 +1437,7 @@ def setup_campaign(campaign_id:int, body:CampaignSetupIn, s:Session=Depends(db))
     # Campaigns always start with every account that was successfully checked and
     # is publishable. `account_ids` remains accepted only for old clients.
     accounts=[account for account in s.scalars(select(InstagramAccount)).all() if account_is_eligible(account) and campaign_allows_account(s,c.id,account)]
-    sources=list(s.scalars(select(Media).where(Media.id.in_(body.source_ids),Media.kind=="original")))
+    sources=list(s.scalars(select(Media).where(Media.id.in_(body.source_ids),Media.kind=="original",Media.status!=DELETED_STATUS)))
     scripts=list(s.scalars(select(Script).where(Script.id.in_(body.script_ids),Script.active==True)))
     if not accounts: raise HTTPException(422,"Não há contas saudáveis e aptas a publicar. Reconecte e valide uma conta antes de criar a campanha.")
     if len(sources)!=len(set(body.source_ids)): raise HTTPException(422,"Selecione mídias originais disponíveis")
