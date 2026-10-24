@@ -1,7 +1,7 @@
 """Remove library originals without breaking already scheduled publications."""
 from pathlib import Path
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 
 from .models import (Campaign, CampaignSourceMedia, CampaignStatus, Media,
                      ProcessedCover, ProcessingExecution, ScheduledPost)
@@ -16,6 +16,9 @@ def original_path(data_dir: Path, relative_path: str) -> Path:
 
 def delete_library_media(session, media_ids: list[int], data_dir: Path) -> dict:
     deleted, skipped, retained, detached, paths = [], [], [], 0, []
+    has_legacy_covers = bool(session.execute(text(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='processed_covers_legacy'"
+    )).scalar())
     for media_id in dict.fromkeys(media_ids):
         item = session.get(Media, media_id)
         if not item or item.kind != "original" or item.status == DELETED_STATUS:
@@ -36,7 +39,10 @@ def delete_library_media(session, media_ids: list[int], data_dir: Path) -> dict:
             session.scalar(select(ProcessedCover.id).where(
                 ProcessedCover.original_media_id == media_id).limit(1)) or
             session.scalar(select(ScheduledPost.id).where(
-                ScheduledPost.processed_media_id == media_id).limit(1)))
+                ScheduledPost.processed_media_id == media_id).limit(1)) or
+            (has_legacy_covers and session.execute(text(
+                "SELECT 1 FROM processed_covers_legacy WHERE original_media_id=:media_id LIMIT 1"
+            ), {"media_id": media_id}).scalar()))
         detached += len(campaigns)
         session.execute(delete(CampaignSourceMedia).where(CampaignSourceMedia.media_id == media_id))
         if has_children or keep_file:

@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sqlalchemy import create_engine, event, select
+from sqlalchemy import create_engine, event, select, text
 from sqlalchemy.orm import Session
 
 from app.db import Base
@@ -75,6 +75,16 @@ class MediaDeletionTests(unittest.TestCase):
         self.session.commit()
         delete_library_media(self.session, [source.id], self.root)
         self.assertFalse(path.exists())
+
+    def test_legacy_cover_reference_keeps_historical_row(self):
+        source = self.media("legacy-cover")
+        self.session.execute(text("CREATE TABLE processed_covers_legacy (id INTEGER PRIMARY KEY, original_media_id INTEGER NOT NULL REFERENCES media_files(id))"))
+        self.session.execute(text("INSERT INTO processed_covers_legacy (original_media_id) VALUES (:id)"), {"id": source.id})
+        self.session.commit()
+        result = delete_library_media(self.session, [source.id], self.root)
+        self.assertEqual(result["deleted"], [source.id])
+        self.assertEqual(self.session.get(Media, source.id).status, DELETED_STATUS)
+        self.assertFalse((self.root / source.relative_path).exists())
 
     def test_processing_campaign_keeps_source_file_until_job_finishes(self):
         source = self.media("running")
