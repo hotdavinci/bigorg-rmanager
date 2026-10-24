@@ -52,6 +52,8 @@ class MediaDeletionTests(unittest.TestCase):
         self.assertEqual(result["deleted"], [source.id])
         self.assertEqual(result["detached_campaigns"], 1)
         self.assertEqual(self.session.get(Media, source.id).status, DELETED_STATUS)
+        self.assertTrue((self.root / source.relative_path).exists())
+        self.assertEqual(cleanup_deleted_original_files(self.session, self.root), 1)
         self.assertFalse((self.root / source.relative_path).exists())
         self.assertIsNotNone(self.session.get(ScheduledPost, post.id))
         self.assertFalse(self.session.scalar(select(CampaignSourceMedia.id)))

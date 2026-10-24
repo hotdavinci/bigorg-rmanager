@@ -22,7 +22,7 @@ O serviço identifica arquivos criados ou alterados usando nomes/hashes e regist
 
 ## Exclusão da biblioteca — 24/10/2026
 
-A exclusão individual e em lote usam a mesma regra. Uma mídia original selecionada sai da Biblioteca e é desvinculada das campanhas; posts processados já agendados continuam preservados. Se cópias processadas ou capas ainda apontam para o original, o registro fica marcado como excluído para manter essas chaves históricas, mas o arquivo original é removido do disco. Mídias sem dependências têm registro e arquivo removidos. Durante processamento em andamento, o arquivo é conservado para não interromper o lote e removido pela limpeza periódica quando não houver geração em curso; a interface informa essa exceção. Novas configurações de campanha não aceitam mídias excluídas.
+A exclusão individual e em lote usam a mesma regra. Uma mídia original selecionada sai da Biblioteca e é desvinculada das campanhas; posts processados já agendados continuam preservados. Se cópias processadas ou capas ainda apontam para o original, o registro fica marcado como excluído para manter essas chaves históricas, e o arquivo original é removido pela limpeza periódica. Mídias sem vínculos nem dependências têm registro e arquivo removidos imediatamente. Fontes vinculadas são mantidas até a próxima limpeza para não interromper uma sincronização ou geração em curso; a interface informa essa exceção. Novas configurações de campanha não aceitam mídias excluídas.
 
 Testes sintéticos com SQLite e chaves estrangeiras cobrem exclusão vinculada a campanha/post, exclusão livre, seleção duplicada e processamento em andamento. Nenhuma mídia real foi apagada para validar a alteração.
 

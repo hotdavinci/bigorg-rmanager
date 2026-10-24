@@ -28,7 +28,9 @@ def delete_library_media(session, media_ids: list[int], data_dir: Path) -> dict:
         running = bool(campaigns and session.scalar(select(ProcessingExecution.id).where(
             ProcessingExecution.campaign_id.in_(campaigns),
             ProcessingExecution.status == "RUNNING").limit(1)))
-        keep_file = generating or running
+        # A sync can have selected this source just before its script is marked
+        # RUNNING. Defer any linked source to the periodic, locked cleanup.
+        keep_file = bool(campaigns) or generating or running
         has_children = bool(session.scalar(select(Media.id).where(
             Media.original_media_id == media_id).limit(1)) or
             session.scalar(select(ProcessedCover.id).where(

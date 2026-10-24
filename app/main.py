@@ -639,7 +639,8 @@ def refill_recurring_campaigns():
                     session.rollback()
                     audit(session,"RECURRING_REFILL_FAILED","A reposição da agenda falhou; nova tentativa na próxima rodada.",campaign.id,account_id)
                     commit_with_retry(session)
-        cleanup_deleted_original_files(session,settings.data_dir)
+        with schedule_materialization_lock:
+            cleanup_deleted_original_files(session,settings.data_dir)
 
 
 async def recurring_schedule_refill():
