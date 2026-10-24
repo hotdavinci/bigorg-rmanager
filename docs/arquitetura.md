@@ -2,13 +2,17 @@
 
 ## Resumo
 
-Visão do backend, frontend, banco e serviços. Consulte para localizar responsabilidades e entender o fluxo completo.
+Visão do backend, frontend, banco, serviços e atualização dos formulários. Consulte para localizar responsabilidades e entender o fluxo completo.
 
 ## Componentes
 
 app/main.py expõe a API e coordena biblioteca, contas, campanhas, agenda, processamento, publicação e métricas. app/models.py define entidades SQLAlchemy; app/services.py prepara mídias e executa scripts. app/meta.py encapsula OAuth, chamadas oficiais e publicação. Gateway de mídia e túnel dão acesso temporário aos arquivos necessários à publicação.
 
 frontend/src.tsx implementa a interface React: painel, contas, biblioteca, campanhas, agenda, métricas e atividade. O frontend chama a API; a existência de um botão não demonstra que credenciais, permissões ou rede estejam disponíveis.
+
+## Rascunhos de Configurações
+
+O painel atualiza dados de acompanhamento a cada cinco segundos, mas carrega os valores editáveis de Configurações uma vez após autenticar. Enquanto a leitura inicial não termina, o formulário não aparece; uma falha oferece nova tentativa. Alterações de prazo, janelas, estratégia, scripts, capa e legendas permanecem no estado local até o respectivo botão Salvar; somente a resposta desse salvamento substitui o rascunho. A atualização periódica não reaplica os valores persistidos durante a edição.
 
 ## Caminho funcional
 

@@ -165,6 +165,9 @@ function App() {
     caption_text: "",
   });
   const [accountSyncDelay, setAccountSyncDelay] = useState(0);
+  const [settingsReady, setSettingsReady] = useState(false);
+  const [settingsLoadFailed, setSettingsLoadFailed] = useState(false);
+  const [settingsLoadAttempt, setSettingsLoadAttempt] = useState(0);
   const [coverPath, setCoverPath] = useState("");
   const [coverName, setCoverName] = useState("");
   const [tunnel, setTunnel] = useState<any>({});
@@ -213,10 +216,6 @@ function App() {
     api("/campaigns").then(setCampaigns);
     api("/scripts").then(setScripts);
     api("/caption-lists").then(setCaptionLists);
-    api("/campaign-defaults").then(setDefaults);
-    api("/account-campaign-sync-settings")
-      .then((result: any) => setAccountSyncDelay(result.delay_days))
-      .catch(() => {});
     api("/scheduled-posts").then(setAgenda);
     api("/activity").then(setActivity);
     api("/activity/summary").then(setActivitySummary);
@@ -235,6 +234,25 @@ function App() {
       .then((result) => setAuthenticated(result.authenticated))
       .catch(() => setAuthenticated(false));
   }, []);
+  useEffect(() => {
+    if (authenticated !== true) return;
+    let cancelled = false;
+    setSettingsLoadFailed(false);
+    Promise.all([
+      api("/campaign-defaults"),
+      api("/account-campaign-sync-settings"),
+    ])
+      .then(([savedDefaults, syncSettings]) => {
+        if (cancelled) return;
+        setDefaults(savedDefaults);
+        setAccountSyncDelay(syncSettings.delay_days);
+        setSettingsReady(true);
+      })
+      .catch(() => {
+        if (!cancelled) setSettingsLoadFailed(true);
+      });
+    return () => { cancelled = true; };
+  }, [authenticated, settingsLoadAttempt]);
   useEffect(() => {
     api(`/insights/reels?period=${insightPeriod}`)
       .then(setInsights)
@@ -1158,7 +1176,17 @@ function App() {
             )}
           </div>
         )}
-        {page === "Configurações" && (
+        {page === "Configurações" && !settingsReady && (
+          <div className="panel">
+            <p>{settingsLoadFailed ? "Não foi possível carregar as configurações." : "Carregando configurações..."}</p>
+            {settingsLoadFailed && (
+              <button className="secondary" onClick={() => setSettingsLoadAttempt((attempt) => attempt + 1)}>
+                Tentar novamente
+              </button>
+            )}
+          </div>
+        )}
+        {page === "Configurações" && settingsReady && (
           <>
             <div className="panel defaults-panel">
               <div className="panel-heading">

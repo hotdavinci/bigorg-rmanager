@@ -14,6 +14,8 @@ Decisões, preferências e estado para continuidade entre chats. Consulte ao ini
 
 ## Estado atual
 
+- 24/10/2026: tela Configurações separada do refresh de cinco segundos. Defaults de campanha e prazo de entrada são carregados uma vez após autenticação; rascunho permanece estável até Salvar, com bloqueio do formulário e opção de repetir caso a leitura inicial falhe. Build frontend aprovado; código enviado ao `main` para publicação na Vercel; confirmação do bundle público pendente. Ver `arquitetura.md`.
+
 - 24/10/2026: exclusão individual/em lote de mídias originais unificada. Remove da Biblioteca e dos vínculos de campanhas, preservando posts já processados; referências históricas ficam como registro excluído e arquivos de lotes em andamento são conservados. Cinco testes sintéticos de FK aprovados, incluindo capa/caminho legados; backend implantado com backup de código e SQLite em `/root/rmanager-media-delete-20261024`, serviço ativo e HTTP 200. Nenhuma mídia real foi excluída para testar. Detalhes em `biblioteca_processamento.md`.
 
 - 24/10/2026: script `cleanM.py` da biblioteca substituído exatamente pelo arquivo local indicado pelo usuário e renomeado no site. Rmanager passa `--no-rename` somente para esse script, preservando associação de saídas nos lotes. Backup protegido em `/root/rmanager-cleanM-20261024`; 15 testes sintéticos aprovados antes da implantação; serviço ativo e `/api/scripts` confirmou o novo nome. O script não foi executado para validação.

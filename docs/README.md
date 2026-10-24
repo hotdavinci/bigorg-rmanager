@@ -8,7 +8,7 @@
 
 | Documento | Escopo / quando consultar |
 |---|---|
-| [Arquitetura e interface](arquitetura.md) | Visão do backend, frontend, banco e serviços. Consulte para localizar responsabilidades e entender o fluxo completo. |
+| [Arquitetura e interface](arquitetura.md) | Visão do backend, frontend, banco, serviços e atualização dos formulários. Consulte para localizar responsabilidades e entender o fluxo completo. |
 | [Biblioteca e processamento](biblioteca_processamento.md) | Importação, exclusão da biblioteca, processamento de vídeo/capa por post, scripts e isolamento de trabalho. Consulte ao mudar preparação de conteúdo ou diagnosticar geração. |
 | [Campanhas e geração de agenda](campanhas_agenda.md) | Campanha recorrente de agora até agora + 24 horas com janelas e quantidades configuráveis, campanhas pontuais, escopo opcional por grupo, entrada tardia, regras legadas e recuperação. Consulte para alterar planejamento. |
 | [Scheduler, tentativas e publicação](publicacao.md) | Concorrência, distinção entre falha de post/conta, URLs, chamadas à Meta, conexões diretas com a Meta, retries e limpeza. Consulte para configurar publicação ou diagnosticar falhas. |
