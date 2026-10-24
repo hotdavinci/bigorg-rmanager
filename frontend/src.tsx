@@ -554,6 +554,7 @@ function App() {
     if (!deleteModal) return;
     try {
       const action = deleteModal.action;
+      let mediaDeletion: any = null;
       if (action === "account")
         await api(`/meta/accounts/${deleteModal.id}`, { method: "DELETE" });
       else if (action === "script")
@@ -561,7 +562,7 @@ function App() {
       else if (action === "captions")
         await api(`/caption-lists/${deleteModal.id}`, { method: "DELETE" });
       else if (action === "media")
-        await api(`/media/${deleteModal.id}`, { method: "DELETE" });
+        mediaDeletion = await api(`/media/${deleteModal.id}`, { method: "DELETE" });
       else if (action === "history")
         await api("/activity", { method: "DELETE" });
       else {
@@ -581,7 +582,7 @@ function App() {
               : action === "captions"
                 ? "Lista excluída."
                 : action === "media"
-                  ? "Mídia excluída."
+                  ? `Mídia excluída da biblioteca.${mediaDeletion?.detached_campaigns ? ` Removida de ${mediaDeletion.detached_campaigns} campanha(s); posts já agendados foram mantidos.` : ""}`
                   : action === "cancel"
                     ? "Campanha cancelada e agendamentos interrompidos."
                     : "Campanha excluída.",
@@ -604,7 +605,7 @@ function App() {
       setDeleteModal(null);
       setSelectedMedia([]);
       setNotice(
-        `${result.deleted.length} mídia(s) excluída(s).${result.skipped.length ? ` ${result.skipped.length} protegida(s) foram mantidas.` : ""}`,
+        `${result.deleted.length} mídia(s) excluída(s) da biblioteca.${result.detached_campaigns ? ` ${result.detached_campaigns} vínculo(s) com campanhas removidos; posts já agendados foram mantidos.` : ""}${result.skipped.length ? ` ${result.skipped.length} não encontrada(s).` : ""}`,
       );
       refresh();
     } catch (error: any) {
@@ -2826,7 +2827,7 @@ function DeleteDialog({ campaign, cancel, confirm }: any) {
       : action === "media"
         ? [
             "Excluir mídia?",
-            "A mídia será removida do armazenamento. Mídias em campanhas ou posts pendentes são protegidas.",
+            "A mídia sairá da biblioteca e das campanhas. Posts já agendados serão mantidos. O arquivo original pode ficar temporariamente se houver processamento em andamento.",
             "Excluir",
           ]
         : action === "account"
@@ -2881,8 +2882,9 @@ function BulkDeleteDialog({ count, cancel, confirm }: any) {
       <div className="modal">
         <h2>Excluir mídias selecionadas?</h2>
         <p>
-          {count} mídia(s) serão removidas. As que estiverem em campanhas ou
-          posts pendentes continuarão protegidas.
+          {count} mídia(s) sairão da biblioteca e das campanhas. Posts já
+          agendados serão mantidos. Arquivos em processamento podem permanecer
+          temporariamente.
         </p>
         <div className="modal-actions">
           <button className="secondary" onClick={cancel}>
