@@ -10,6 +10,10 @@ from .models import (Campaign, CampaignSourceMedia, CampaignStatus, Media,
 DELETED_STATUS = "Excluída"
 
 
+def original_path(data_dir: Path, relative_path: str) -> Path:
+    return data_dir / Path(relative_path.replace("\\", "/"))
+
+
 def delete_library_media(session, media_ids: list[int], data_dir: Path) -> dict:
     deleted, skipped, retained, detached, paths = [], [], [], 0, []
     for media_id in dict.fromkeys(media_ids):
@@ -41,7 +45,7 @@ def delete_library_media(session, media_ids: list[int], data_dir: Path) -> dict:
         else:
             session.delete(item)
         if not keep_file:
-            paths.append(data_dir / item.relative_path)
+            paths.append(original_path(data_dir, item.relative_path))
         deleted.append(media_id)
     session.commit()
     # Files are removed only after the database no longer exposes them.
@@ -61,7 +65,7 @@ def cleanup_deleted_original_files(session, data_dir: Path) -> int:
     removed = 0
     for item in session.scalars(select(Media).where(
         Media.kind == "original", Media.status == DELETED_STATUS)):
-        path = data_dir / item.relative_path
+        path = original_path(data_dir, item.relative_path)
         if path.is_file():
             path.unlink()
             removed += 1

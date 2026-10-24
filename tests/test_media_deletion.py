@@ -66,6 +66,14 @@ class MediaDeletionTests(unittest.TestCase):
         self.assertIsNone(self.session.get(Media, media_id))
         self.assertFalse(path.exists())
 
+    def test_legacy_windows_relative_path_is_removed(self):
+        source = self.media("legacy")
+        path = self.root / source.relative_path
+        source.relative_path = source.relative_path.replace("/", "\\")
+        self.session.commit()
+        delete_library_media(self.session, [source.id], self.root)
+        self.assertFalse(path.exists())
+
     def test_processing_campaign_keeps_source_file_until_job_finishes(self):
         source = self.media("running")
         campaign = Campaign(name="synthetic", status=CampaignStatus.PROCESSING)
