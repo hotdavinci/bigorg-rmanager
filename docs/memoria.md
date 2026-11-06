@@ -14,7 +14,7 @@ Decisões, preferências e estado para continuidade entre chats. Consulte ao ini
 
 ## Estado atual
 
-- 05/11/2026: tela Contas passa a separar automaticamente contas no limite em Arquivadas, no fim, inclusive inaptas que atingiram o limite. Fora de grupos disponíveis/seleção em lote/abrir todas; ações individuais e histórico preservados. Classificação por reel_limit_reached, sem nova flag ou mudança na VPS. Se limite aumentar/desativar, saudáveis podem voltar à lista disponível. Build e renderização React sintética aprovados; publicação em preparação.
+- 05/11/2026: tela Contas passa a separar automaticamente contas no limite em Arquivadas, no fim, inclusive inaptas que atingiram o limite. Fora de grupos disponíveis/seleção em lote/abrir todas; ações individuais e histórico preservados. Classificação por reel_limit_reached, sem nova flag ou mudança na VPS. Se limite aumentar/desativar, saudáveis podem voltar à lista disponível. Build e renderização React sintética aprovados. Publicado em `d548f8c`, Vercel success e bundle público com seção Arquivadas confirmados.
 
 - 05/11/2026: falha por proxy no link OAuth isolada por testes HTTP: Vercel acessível, API por hostname com timeout, mesma API com IPv4 explícito e TLS/SNI preservados respondeu pelos dois proxies. Não guardar IPs/credenciais de proxy. Ponte Vercel preparada para início/callback sem expor o browser ao domínio da API; sem alteração dos proxies, DNS global ou VPS. Seis testes Node sintéticos aprovados. Implantado em `6976da7`, Vercel success; link pelos dois proxies originais retornou 302 direto ao Instagram em ~2,1–2,3 s, sem seguir autorização, e callback com state sintético inválido retornou 400 sem salto à API. Nenhuma conta autorizada; conclusão real no navegador aguarda usuário.
 
