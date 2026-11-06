@@ -2,7 +2,22 @@
 
 ## Resumo
 
-Concorrência, estados, protocolo Meta por conexão direta, retries e limpeza. Consulte para diagnosticar posts atrasados, repetidos ou falhos.
+Concorrência, limite total de Reels por conta, estados, protocolo Meta por conexão direta, retries e limpeza. Consulte para diagnosticar posts atrasados, repetidos ou falhos.
+
+## Limite total por conta — 04/11/2026
+
+Configurações permite definir um máximo global de Reels publicados com sucesso **por conta**, somando todas as campanhas e sem reinício diário. Zero desativa o limite. A contagem inclui publicações `PUBLISHED` anteriores ainda presentes no Rmanager; não consulta o total do perfil Instagram nem recupera histórico apagado antes desta implementação.
+
+`app/reel_limits.py` lê `account_reel_limit` em `ApplicationSetting`. O total por conta usa `account-published-total-<id>`; sem esse registro, utiliza a quantidade local de posts `PUBLISHED`. No próximo sucesso, grava o total anterior mais um na mesma transação do post e da tentativa confirmados, antes da limpeza de arquivos. Limpeza de Atividade, exclusão de campanha e reinicialização de geração preservam o total antes de apagar posts. Reset de Insights não interfere. Falhas, tentativas e posts pendentes não contam.
+
+O scheduler exclui contas no limite antes de reivindicar posts e o executor reconfere antes de iniciar o envio. A serialização existente por conta impede que duas tarefas do mesmo scheduler consumam a última vaga simultaneamente. Um envio que já começou pode concluir se o limite for reduzido durante sua execução; não se promete cancelamento de operações Meta em andamento. Persistem os limites anteriores do controle entre múltiplos processos e da reconciliação de respostas perdidas.
+
+A conta mantém saúde, token, vínculos e fila existente; limite não é falha de autenticação. Os posts ficam pendentes e podem voltar a sair se o limite aumentar ou for desativado, respeitando as demais regras. A inclusão em campanhas, estimativa, geração e reposição também conferem o limite; veja [Campanhas](campanhas_agenda.md#limite-total-de-reels-por-conta--04112026). O contador não é zerado ao reconectar.
+
+Validação local: 12 testes novos sintéticos aprovados; build TypeScript/Vite aprovado. A suíte ampliada executou 82 testes: 81 passaram e um teste anterior de conexão de mídia falhou por fixture sem `status` (`test_media_connections.py`), em trecho não alterado nesta entrega. Sem publicação real, sincronização externa, deploy ou leitura de dados/configuração reais.
+
+
+Implantação em 05/11/2026: backend ativo na VPS e rota confirmada no OpenAPI (HTTP 200), com backup protegido de código. Entrada de novos trabalhos pausada temporariamente para drenar os envios em andamento e estados de campanha restaurados após a atualização. Build e 12 testes do candidato remoto aprovados; 81 testes passaram excluindo o teste anterior de mídia com fixture incompleta. Envio ao Git e confirmação do bundle público em acompanhamento; nenhum limite real alterado nem publicação manual de teste.
 
 ## Reivindicação
 

@@ -165,6 +165,8 @@ function App() {
     caption_text: "",
   });
   const [accountSyncDelay, setAccountSyncDelay] = useState(0);
+  const [accountReelLimit, setAccountReelLimit] = useState("0");
+  const [savingReelLimit, setSavingReelLimit] = useState(false);
   const [settingsReady, setSettingsReady] = useState(false);
   const [settingsLoadFailed, setSettingsLoadFailed] = useState(false);
   const [settingsLoadAttempt, setSettingsLoadAttempt] = useState(0);
@@ -241,11 +243,13 @@ function App() {
     Promise.all([
       api("/campaign-defaults"),
       api("/account-campaign-sync-settings"),
+      api("/account-reel-limit-settings"),
     ])
-      .then(([savedDefaults, syncSettings]) => {
+      .then(([savedDefaults, syncSettings, reelLimitSettings]) => {
         if (cancelled) return;
         setDefaults(savedDefaults);
         setAccountSyncDelay(syncSettings.delay_days);
+        setAccountReelLimit(String(reelLimitSettings.limit));
         setSettingsReady(true);
       })
       .catch(() => {
@@ -724,6 +728,20 @@ function App() {
       setNotice(error.message);
     }
   };
+  const saveAccountReelLimit = async () => {
+    setSavingReelLimit(true);
+    try {
+      const saved = await api("/account-reel-limit-settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ limit: Number(accountReelLimit) }),
+      });
+      setAccountReelLimit(String(saved.limit));
+      setNotice("Limite de Reels por conta salvo.");
+      refresh();
+    } catch (error: any) { setNotice(error.message); }
+    finally { setSavingReelLimit(false); }
+  };
   const saveAccountSyncDelay = async () => {
     try {
       const delay_days = Math.max(
@@ -1188,6 +1206,24 @@ function App() {
         )}
         {page === "Configurações" && settingsReady && (
           <>
+            <div className="panel defaults-panel">
+              <div className="panel-heading"><div>
+                <h2>Limite de Reels por conta</h2>
+                <p>Total de Reels publicados com sucesso pelo Rmanager, somando todas as campanhas.
+                  Ao atingir o limite, a conta para de publicar e não entra em campanhas.</p>
+              </div></div>
+              <div className="defaults-grid"><label>
+                Máximo de Reels publicados por conta
+                <input type="number" min="0" max="2147483647" step="1"
+                  value={accountReelLimit} disabled={savingReelLimit}
+                  onChange={(event) => setAccountReelLimit(event.target.value)} />
+                <small>0 = sem limite. Inclui publicações anteriores ainda registradas.
+                  Limpar o histórico não zera o contador. Um envio já iniciado pode terminar.</small>
+              </label></div>
+              <div className="modal-actions"><button className="primary" type="button"
+                disabled={savingReelLimit || accountReelLimit.trim() === "" || !Number.isInteger(Number(accountReelLimit)) || Number(accountReelLimit) < 0 || Number(accountReelLimit) > 2147483647}
+                onClick={saveAccountReelLimit}>{savingReelLimit ? "Salvando..." : "Salvar limite"}</button></div>
+            </div>
             <div className="panel defaults-panel">
               <div className="panel-heading">
                 <div>
@@ -2501,6 +2537,8 @@ function AccountsPage({
           <input name="nickname" defaultValue={account.nickname || ""} maxLength={120} aria-label={`Apelido de @${account.username || account.nome}`} placeholder="Apelido (opcional)" />
           <button className="secondary" disabled={saving}>Salvar apelido</button>
         </form>
+        <small>{account.published_reels ?? 0} Reels publicados pelo Rmanager{account.reel_limit ? ` / limite de ${account.reel_limit}` : " · Sem limite"}
+          {account.reel_limit_reached ? " · LIMITE ATINGIDO — publicações e entrada em campanhas bloqueadas" : ""}</small>
         <small>Vinculada via OAuth em: {account.conectada_em ? eventDate(account.conectada_em) : "Data não disponível"}</small>
         <small>Postar após {account.effective_delay_days} dia(s) da vinculação · {account.posting_delay_days == null ? "Padrão global" : "Prazo da conta"}
           {account.sincronizacao_devida_em ? ` · Liberada em ${eventDate(account.sincronizacao_devida_em)}` : ""}
@@ -2513,8 +2551,8 @@ function AccountsPage({
         </small>
       </div>
       <span className="row-actions">
-        <span className={`tag ${account.apta ? "" : "tag-error"}`}>
-          {account.apta ? "APTA A PUBLICAR" : account.status || "COM ERRO"}
+        <span className={`tag ${account.apta && !account.reel_limit_reached ? "" : "tag-error"}`}>
+          {account.reel_limit_reached ? "LIMITE ATINGIDO" : account.apta ? "APTA A PUBLICAR" : account.status || "COM ERRO"}
         </span>
         {account.apta && (
           <button

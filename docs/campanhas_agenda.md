@@ -2,7 +2,14 @@
 
 ## Resumo
 
-Estados, contas vinculadas, prazo de liberação específico/global, seleção de mídia e campanhas recorrentes com horizonte móvel de 24 horas. Consulte para alterar planejamento, reposição e recuperação; regras anteriores permanecem legíveis.
+Estados, limite total de Reels por conta, contas vinculadas, prazo de liberação específico/global, seleção de mídia e campanhas recorrentes com horizonte móvel de 24 horas. Consulte para alterar planejamento, reposição e recuperação; regras anteriores permanecem legíveis.
+
+## Limite total de Reels por conta — 04/11/2026
+
+Setup e sincronização automática não criam novos vínculos para contas que atingiram o limite configurado. Estimativa, materialização de agenda, geração e reposição recorrente verificam a mesma regra. Contas abaixo do limite continuam sujeitas à saúde, grupo, prazo e exclusões anteriores. A quantidade de slots de uma campanha não representa reserva de vagas: o máximo é aplicado aos sucessos acumulados no momento da publicação.
+
+Vínculos e posts já existentes são preservados; o scheduler bloqueia envios enquanto a conta estiver no limite. Aumentar/desativar o limite pode liberar sua fila existente, sem regenerar horários. A regra é global por conta e não se confunde com a quantidade diária/por janela. Veja a contagem persistente e os limites de operações em andamento em [Publicação](publicacao.md#limite-total-por-conta--04112026).
+
 
 ## Configuração
 

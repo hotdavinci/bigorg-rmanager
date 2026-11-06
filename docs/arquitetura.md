@@ -12,7 +12,7 @@ frontend/src.tsx implementa a interface React: painel, contas, biblioteca, campa
 
 ## Rascunhos de Configurações
 
-O painel atualiza dados de acompanhamento a cada cinco segundos, mas carrega os valores editáveis de Configurações uma vez após autenticar. Enquanto a leitura inicial não termina, o formulário não aparece; uma falha oferece nova tentativa. Alterações de prazo, janelas, estratégia, scripts, capa e legendas permanecem no estado local até o respectivo botão Salvar; somente a resposta desse salvamento substitui o rascunho. A atualização periódica não reaplica os valores persistidos durante a edição.
+O painel atualiza dados de acompanhamento a cada cinco segundos, mas carrega os valores editáveis de Configurações uma vez após autenticar. Enquanto a leitura inicial não termina, o formulário não aparece; uma falha oferece nova tentativa. Alterações de limite total de Reels por conta, prazo, janelas, estratégia, scripts, capa e legendas permanecem no estado local até o respectivo botão Salvar; somente a resposta desse salvamento substitui o rascunho. A atualização periódica não reaplica os valores persistidos durante a edição.
 
 ## Caminho funcional
 

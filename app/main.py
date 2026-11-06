@@ -26,6 +26,7 @@ from .media_gateway import media_app
 from .daily_schedule import daily_quantity, daily_ranges, utc_deadline_local, is_windowed, is_recurring, windowed_ranges, window_specs, RECURRING_WINDOWED_RULE
 from .insight_reset import include_after_reset
 from .processing_order import order_pending_jobs
+from .reel_limits import reel_limit, published_total, published_total_expression, limit_reached, save_published_total, preserve_published_totals
 from .account_errors import account_access_failed
 import uvicorn
 
@@ -45,6 +46,10 @@ def account_is_eligible(account: InstagramAccount, now: datetime|None=None) -> b
     """One conservative definition used by the UI, setup and scheduler."""
     now=now or datetime.utcnow()
     return bool(not account.deleted_at and account.active and account.encrypted_token and account.last_verified_at and not (account.last_error or "").strip() and (not account.token_expires_at or account.token_expires_at>now))
+
+def account_can_publish(session: Session, account: InstagramAccount, now: datetime|None=None) -> bool:
+    return account_is_eligible(account,now) and not limit_reached(session,account.id)
+
 
 def campaign_allows_account(session: Session, campaign_id: int, account: InstagramAccount) -> bool:
     """An optional stored group scope limits links created by setup and OAuth sync."""
@@ -121,6 +126,7 @@ def _clone_processed_for_schedule(session: Session, campaign_id: int, original_m
 
 def materialize_missing_schedule_for_account(session: Session, campaign: Campaign, account: InstagramAccount, not_before: datetime|None=None) -> int:
     """Process fresh original video/cover for every missing future occurrence."""
+    if not account_can_publish(session,account): return 0
     rule=session.scalar(select(CampaignScheduleRule).where(CampaignScheduleRule.campaign_id==campaign.id))
     if not rule: return 0
     try:
@@ -161,7 +167,7 @@ def materialize_missing_schedule_for_account(session: Session, campaign: Campaig
     order_pending_jobs(jobs)
     created=0; batch_size=max(1,min(getattr(settings,"processing_batch_size",12),50))
     for first in range(0,len(jobs),batch_size):
-        if not account_is_eligible(account) or campaign.status!=CampaignStatus.ACTIVE: break
+        if not account_can_publish(session,account) or campaign.status!=CampaignStatus.ACTIVE: break
         results=process_slots_batch(session,campaign.id,jobs[first:first+batch_size])
         for job,output,cover_data in results:
             if campaign.cover_path and not cover_data:
@@ -210,7 +216,9 @@ def schedule_account_campaign_sync(session: Session, account: InstagramAccount) 
 def sync_account_to_active_campaigns(session: Session, account: InstagramAccount, not_before: datetime|None=None, on_campaign=None) -> tuple[int,int]:
     """Links a valid account once and materializes only still-allowed future slots."""
     added=created=0
+    if not account_can_publish(session,account): return added,created
     for campaign in session.scalars(select(Campaign).where(Campaign.status==CampaignStatus.ACTIVE)):
+        if not account_can_publish(session,account): break
         if not campaign_allows_account(session,campaign.id,account): continue
         linked=session.scalar(select(CampaignAccount).where(CampaignAccount.campaign_id==campaign.id,CampaignAccount.account_id==account.id))
         if linked: continue
@@ -247,8 +255,10 @@ def load_account_sync_progress(account_id:int) -> dict:
 
 def estimated_account_sync_slots(session:Session, account:InstagramAccount) -> int:
     """A contagem é apenas para o painel, sem criar nenhum post ainda."""
+    if not account_can_publish(session,account): return 0
     total=0; now=datetime.now()
     for campaign in session.scalars(select(Campaign).where(Campaign.status==CampaignStatus.ACTIVE)):
+        if not account_can_publish(session,account): break
         if not campaign_allows_account(session,campaign.id,account): continue
         if session.scalar(select(CampaignAccount).where(CampaignAccount.campaign_id==campaign.id,CampaignAccount.account_id==account.id)): continue
         rule=session.scalar(select(CampaignScheduleRule).where(CampaignScheduleRule.campaign_id==campaign.id))
@@ -273,7 +283,7 @@ def run_account_campaign_sync_background(account_id:int):
     try:
         with DbSession() as session:
             account=session.get(InstagramAccount,account_id)
-            if not account or not account_is_eligible(account):
+            if not account or not account_can_publish(session,account):
                 save_account_sync_progress(account_id,status="FAILED",message="A conta deixou de estar apta antes da sincronização.",finished_at=datetime.utcnow().isoformat())
                 return
             total=estimated_account_sync_slots(session,account)
@@ -313,7 +323,7 @@ def sync_due_connected_accounts(session: Session) -> dict:
     for account in due:
         # A disconnected, expired or failed account is never admitted. A future
         # OAuth reconnection resets due_at and is the only way it can return.
-        if not account_is_eligible(account,now):
+        if not account_can_publish(session,account,now):
             continue
         if queue_account_campaign_sync(account.id): completed+=1
     return {"queued":completed,"added":added,"created":created}
@@ -544,6 +554,7 @@ def recover_stalled_claims(session: Session, now: datetime) -> int:
 def claim_due_posts(session: Session, account_ids_in_flight: set[int], now: datetime, limit: int) -> list[int]:
     due=session.scalars(select(ScheduledPost).join(Campaign).join(InstagramAccount,ScheduledPost.account_id==InstagramAccount.id).where(
         or_(InstagramAccount.campaign_sync_due_at.is_(None),InstagramAccount.campaign_sync_due_at<=datetime.utcnow()),
+        or_(reel_limit(session)==0,published_total_expression(InstagramAccount.id)<reel_limit(session)),
         ScheduledPost.status==PostStatus.PENDING, ScheduledPost.scheduled_for<=now,
         or_(ScheduledPost.next_attempt_at.is_(None),ScheduledPost.next_attempt_at<=now),
         # Posts de um lote já validado podem sair enquanto os lotes seguintes
@@ -573,6 +584,8 @@ async def publish_claimed_post(post_id: int, account_ids_in_flight: set[int], se
                 if not post or post.status!=PostStatus.CLAIMED: return
                 account_id=post.account_id; account=s.get(InstagramAccount,post.account_id); media=s.get(Media,post.processed_media_id)
                 if not account or not media: raise RuntimeError("Conta ou mídia processada não encontrada")
+                if limit_reached(s,account.id):
+                    post.status=PostStatus.PENDING; s.commit(); return
                 if not account_is_eligible(account):
                     cancel_account_from_active_campaigns(s,account,"Conta não está apta a publicar")
                     s.commit(); return
@@ -591,7 +604,9 @@ async def publish_claimed_post(post_id: int, account_ids_in_flight: set[int], se
                     raise RuntimeError("Capa processada obrigatória ausente; publicação interrompida antes de enviar à Meta")
                 post.status=PostStatus.WAITING_META; s.commit()
                 media_id=await meta.publish_reel(account.meta_account_id,meta.decrypt(account.encrypted_token),public_url,post.caption,cover_url)
+                save_published_total(s,account.id,published_total(s,account.id)+1)
                 post.status=PostStatus.PUBLISHED; post.last_error=""; attempt.status="PUBLISHED"; attempt.meta_media_id=media_id; attempt.finished_at=datetime.utcnow()
+                s.commit()  # Preserve confirmed publication and lifetime total before file cleanup.
                 archive_published_reel_video(s,account.id,media_id,media_path)
                 other_uses=s.scalar(select(func.count()).select_from(ScheduledPost).where(ScheduledPost.processed_media_id==media.id,ScheduledPost.id!=post.id,ScheduledPost.status.not_in([PostStatus.PUBLISHED,PostStatus.CANCELLED,PostStatus.SKIPPED]))) or 0
                 if not other_uses:
@@ -630,7 +645,7 @@ def refill_recurring_campaigns():
             account_ids=list(session.scalars(select(CampaignAccount.account_id).where(CampaignAccount.campaign_id==campaign.id)))
             for account_id in account_ids:
                 account=session.get(InstagramAccount,account_id)
-                if not account or not account_is_eligible(account): continue
+                if not account or not account_can_publish(session,account): continue
                 try:
                     with schedule_materialization_lock:
                         materialize_missing_schedule_for_account(session,campaign,account,account.campaign_sync_due_at)
@@ -844,6 +859,7 @@ def purge_campaign(session: Session, campaign_id: int) -> bool:
     legacy_links=session.execute(text("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduled_post_covers_legacy'")).scalar()
     if legacy_links:
         session.execute(text("DELETE FROM scheduled_post_covers_legacy WHERE post_id IN (SELECT id FROM scheduled_posts WHERE campaign_id=:campaign_id)"),{"campaign_id":campaign_id})
+    preserve_published_totals(session)
     session.execute(delete(PublicationAttempt).where(PublicationAttempt.post_id.in_(post_ids)))
     session.execute(delete(ScheduledPostCover).where(ScheduledPostCover.post_id.in_(post_ids)))
     session.execute(delete(ProcessedCover).where(ProcessedCover.campaign_id==campaign_id))
@@ -888,7 +904,7 @@ def restart_app():
 @app.get("/api/meta/accounts")
 def accounts(s:Session=Depends(db)):
     now=datetime.utcnow()
-    return [{"nickname":a.nickname,"posting_delay_days":a.posting_delay_days,"effective_delay_days":account_campaign_sync_delay_days(s,a),"account_group":a.account_group,"id":a.id,"username":a.username,"nome":a.display_name,"ativo":a.active,"conectada_em":a.connected_at,"expira_em":a.token_expires_at,"verificada_em":a.last_verified_at,"erro":a.last_error,"sincronizacao_devida_em":a.campaign_sync_due_at,"sincronizada_em":a.campaign_sync_completed_at,"apta":account_is_eligible(a,now),"status":"APTA" if account_is_eligible(a,now) else ("TOKEN_EXPIRADO" if a.token_expires_at and a.token_expires_at<=now else "COM_ERRO" if a.last_error else "DESCONECTADA")} for a in s.scalars(select(InstagramAccount).where(InstagramAccount.deleted_at.is_(None)).order_by(InstagramAccount.connected_at.desc()))]
+    return [{"published_reels":published_total(s,a.id),"reel_limit":reel_limit(s),"reel_limit_reached":limit_reached(s,a.id),"nickname":a.nickname,"posting_delay_days":a.posting_delay_days,"effective_delay_days":account_campaign_sync_delay_days(s,a),"account_group":a.account_group,"id":a.id,"username":a.username,"nome":a.display_name,"ativo":a.active,"conectada_em":a.connected_at,"expira_em":a.token_expires_at,"verificada_em":a.last_verified_at,"erro":a.last_error,"sincronizacao_devida_em":a.campaign_sync_due_at,"sincronizada_em":a.campaign_sync_completed_at,"apta":account_is_eligible(a,now),"status":"APTA" if account_is_eligible(a,now) else ("TOKEN_EXPIRADO" if a.token_expires_at and a.token_expires_at<=now else "COM_ERRO" if a.last_error else "DESCONECTADA")} for a in s.scalars(select(InstagramAccount).where(InstagramAccount.deleted_at.is_(None)).order_by(InstagramAccount.connected_at.desc()))]
 
 class AccountNicknameIn(BaseModel):
     nickname: str = Field(max_length=120)
@@ -931,6 +947,20 @@ def save_account_preferences(body:AccountPreferencesIn,s:Session=Depends(db)):
 async def refresh_accounts_health():
     result=await run_account_health_check(force=True)
     return result or {"checked":0,"healthy":0,"removed":0,"transient":0}
+
+class AccountReelLimitIn(BaseModel):
+    limit: int = Field(ge=0,le=2147483647,strict=True)
+
+@app.get("/api/account-reel-limit-settings")
+def account_reel_limit_settings(s:Session=Depends(db)):
+    return {"limit":reel_limit(s)}
+
+@app.put("/api/account-reel-limit-settings")
+def save_account_reel_limit_settings(body:AccountReelLimitIn,s:Session=Depends(db)):
+    item=s.get(ApplicationSetting,"account_reel_limit") or ApplicationSetting(key="account_reel_limit")
+    item.value=str(body.limit); s.add(item)
+    commit_with_retry(s)
+    return {"limit":body.limit}
 
 @app.get("/api/account-campaign-sync-settings")
 def account_campaign_sync_settings(s:Session=Depends(db)):
@@ -1056,7 +1086,7 @@ def dashboard(period:str="total",s:Session=Depends(db)):
     # from accounts that later became unavailable or were removed from the UI.
     published=[reel for reel in s.scalars(select(InstagramReel)) if reel.published_at and (not cutoff or cutoff<=reel.published_at<=now)]
     upcoming=sorted(future,key=lambda post:post.scheduled_for)[:5]
-    return {"period":period,"contas_aptas":len(healthy),"agendados":len(scheduled),"pendentes":pending,"processing_message":processing_messages[0] if processing_messages else "","publicados":len(published),"proximas":[{"id":post.id,"quando":post.scheduled_for,"legenda":post.caption} for post in upcoming]}
+    return {"period":period,"contas_aptas":sum(account_can_publish(s,account,now) for account in healthy),"agendados":len(scheduled),"pendentes":pending,"processing_message":processing_messages[0] if processing_messages else "","publicados":len(published),"proximas":[{"id":post.id,"quando":post.scheduled_for,"legenda":post.caption} for post in upcoming]}
 
 @app.get("/api/insights/views-chart")
 def insight_views_chart(period:str="24h",start:str|None=None,end:str|None=None,s:Session=Depends(db)):
@@ -1255,6 +1285,7 @@ def audit_log(limit:int=100,s:Session=Depends(db)):
 def clear_history(s:Session=Depends(db)):
     finished=[PostStatus.PUBLISHED,PostStatus.FAILED,PostStatus.SKIPPED,PostStatus.CANCELLED]
     post_ids=select(ScheduledPost.id).where(ScheduledPost.status.in_(finished))
+    preserve_published_totals(s)
     s.execute(delete(PublicationAttempt).where(PublicationAttempt.post_id.in_(post_ids)))
     # Databases created before per-post covers retain this legacy link table.
     # It must be cleared first or SQLite correctly protects the posts from deletion.
@@ -1437,10 +1468,10 @@ def setup_campaign(campaign_id:int, body:CampaignSetupIn, s:Session=Depends(db))
     if not c or c.status not in (CampaignStatus.DRAFT,CampaignStatus.PROCESSING_FAILED,CampaignStatus.READY_TO_SCHEDULE): raise HTTPException(409,"Esta campanha não pode ser alterada agora")
     # Campaigns always start with every account that was successfully checked and
     # is publishable. `account_ids` remains accepted only for old clients.
-    accounts=[account for account in s.scalars(select(InstagramAccount)).all() if account_is_eligible(account) and campaign_allows_account(s,c.id,account)]
+    accounts=[account for account in s.scalars(select(InstagramAccount)).all() if account_can_publish(s,account) and campaign_allows_account(s,c.id,account)]
     sources=list(s.scalars(select(Media).where(Media.id.in_(body.source_ids),Media.kind=="original",Media.status!=DELETED_STATUS)))
     scripts=list(s.scalars(select(Script).where(Script.id.in_(body.script_ids),Script.active==True)))
-    if not accounts: raise HTTPException(422,"Não há contas saudáveis e aptas a publicar. Reconecte e valide uma conta antes de criar a campanha.")
+    if not accounts: raise HTTPException(422,"Não há contas aptas abaixo do limite de Reels. Verifique a conexão das contas e o limite nas Configurações.")
     if len(sources)!=len(set(body.source_ids)): raise HTTPException(422,"Selecione mídias originais disponíveis")
     if len(scripts)!=len(set(body.script_ids)): raise HTTPException(422,"Selecione scripts ativos")
     if not body.start_date or not body.days or body.days<1 or not body.intervals: raise HTTPException(422,"Informe os dias e ao menos um intervalo")
@@ -1514,6 +1545,7 @@ def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(
         post_ids=select(ScheduledPost.id).where(ScheduledPost.campaign_id==campaign_id)
         s.execute(delete(ScheduledPostCover).where(ScheduledPostCover.post_id.in_(post_ids)))
         s.execute(delete(ProcessedCover).where(ProcessedCover.campaign_id==campaign_id))
+        preserve_published_totals(s)
         s.execute(delete(PublicationAttempt).where(PublicationAttempt.post_id.in_(post_ids)))
         s.execute(delete(ScheduledPost).where(ScheduledPost.campaign_id==campaign_id))
         c.status=CampaignStatus.PROCESSING; s.commit()
@@ -1581,7 +1613,7 @@ def generate_schedule(campaign_id:int,body:GenerateScheduleIn,s:Session=Depends(
                 return {"count":scheduled,"status":CampaignStatus.CANCELLED}
             for job,media,cover_data in results:
                 target_account=s.get(InstagramAccount,job["account_id"])
-                if not target_account or not account_is_eligible(target_account):
+                if not target_account or not account_can_publish(s,target_account):
                     data_path(media.relative_path).unlink(missing_ok=True); s.delete(media)
                     if cover_data: data_path(cover_data[0]).unlink(missing_ok=True)
                     continue

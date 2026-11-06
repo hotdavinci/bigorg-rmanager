@@ -2,7 +2,12 @@
 
 ## Resumo
 
-Conexão Meta, armazenamento de tokens, seleção/exclusão, grupos com título, apelidos individuais, prazo prioritário por conta e recuperação. Consulte ao alterar a tela de contas, autenticação e callbacks.
+Conexão Meta, armazenamento de tokens, seleção/exclusão, grupos com título, apelidos individuais, prazo prioritário por conta, limite acumulado de Reels e recuperação. Consulte ao alterar a tela de contas, autenticação e callbacks.
+
+## Contas com limite atingido — 04/11/2026
+
+A tela Contas mostra total local publicado, limite vigente e aviso `LIMITE ATINGIDO`. Contas saudáveis continuam visíveis mesmo bloqueadas por quantidade. `apta` mantém a semântica legada de saúde/conexão; `reel_limit_reached` informa o bloqueio adicional. O bloqueio não grava erro de acesso nem desativa a conta; reconexão não zera seu total. O número de contas aptas no dashboard considera também o limite. Consulte [Publicação](publicacao.md#limite-total-por-conta--04112026) para origem do contador e desbloqueio da fila.
+
 
 ## Conexão
 

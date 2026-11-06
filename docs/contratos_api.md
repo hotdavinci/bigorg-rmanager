@@ -2,7 +2,14 @@
 
 ## Resumo
 
-Campos e tipos sem valores reais, preferências em lote de contas e rotas da API. Consulte para localizar contratos antes de mudar formato/API.
+Campos e tipos sem valores reais, preferências em lote de contas, limite de Reels e rotas da API. Consulte para localizar contratos antes de mudar formato/API.
+
+## Limite de Reels — 04/11/2026
+
+`GET /api/account-reel-limit-settings` retorna `{ "limit": 0 }` por padrão. `PUT` na mesma rota recebe e retorna `limit`, inteiro estrito de 0 a 2147483647; zero significa sem limite. Frações, booleanos, strings e negativos são rejeitados. Frontend carrega esse valor junto aos demais rascunhos após autenticar e só o salva no botão próprio.
+
+A listagem `/api/meta/accounts` acrescenta `published_reels: int`, `reel_limit: int` e `reel_limit_reached: bool`. `apta` e `status` mantêm o contrato anterior de saúde; os consumidores que publicam ou vinculam campanhas usam `account_can_publish`, que combina saúde e limite. Contadores persistidos em `ApplicationSetting` dispensam alteração de schema. Consumidores conferidos: Configurações/Contas no frontend, setup, sync, geração/recuperação, reposição, scheduler/executor, exclusão de campanhas e limpeza de atividade. Detalhes em [Publicação](publicacao.md#limite-total-por-conta--04112026).
+
 
 ## Como usar
 
