@@ -3,6 +3,17 @@
   "buildCommand": "npm run vercel-build",
   "outputDirectory": "frontend/dist",
   "rewrites": [
-    { "source": "/((?!api/).*)", "destination": "/index.html" }
-  ]
+    {
+      "source": "/((?!api/).*)",
+      "destination": "/index.html"
+    }
+  ],
+  "functions": {
+    "api/meta/connect.js": {
+      "maxDuration": 20
+    },
+    "api/meta/callback.js": {
+      "maxDuration": 60
+    }
+  }
 }

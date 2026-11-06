@@ -2,12 +2,20 @@
 
 ## Resumo
 
-Conexão Meta, armazenamento de tokens, seleção/exclusão, grupos com título, apelidos individuais, prazo prioritário por conta, limite acumulado de Reels e recuperação. Consulte ao alterar a tela de contas, autenticação e callbacks.
+Conexão Meta, ponte OAuth para proxies com falha de DNS, armazenamento de tokens, seleção/exclusão, grupos com título, apelidos individuais, prazo prioritário por conta, limite acumulado de Reels e recuperação. Consulte ao alterar a tela de contas, autenticação e callbacks.
 
 ## Contas com limite atingido — 04/11/2026
 
 A tela Contas mostra total local publicado, limite vigente e aviso `LIMITE ATINGIDO`. Contas saudáveis continuam visíveis mesmo bloqueadas por quantidade. `apta` mantém a semântica legada de saúde/conexão; `reel_limit_reached` informa o bloqueio adicional. O bloqueio não grava erro de acesso nem desativa a conta; reconexão não zera seu total. O número de contas aptas no dashboard considera também o limite. Consulte [Publicação](publicacao.md#limite-total-por-conta--04112026) para origem do contador e desbloqueio da fila.
 
+
+## Conexão com proxy e DNS — 05/11/2026
+
+O início e o callback de produção usam ponte server-side na Vercel: `api/meta/connect.js` consulta a API com redirect manual e devolve somente o destino HTTPS Instagram/Facebook permitido; `api/meta/callback.js` envia apenas os parâmetros OAuth escalares permitidos e retransmite status/HTML. O navegador deixa de visitar o domínio da API nessas duas etapas e continua usando seu proxy ao acessar Vercel/Instagram. A API conserva a criação/validação de state, troca do código e armazenamento criptografado de tokens. A Vercel recebe o código temporário no callback, como já ocorria; os handlers não o registram nem persistem e não recebem tokens de conta em respostas normais. Cache desativado e Referrer-Policy no-referrer.
+
+Timeout de início de 15 s e callback de 55 s, com duração de função de 20/60 s em `vercel.json`. Não há retry automático do callback: um timeout pode ocorrer após a API consumir o código; conferir o painel antes de reconectar. O alvo do callback é obrigatório no deploy, sem fallback localhost nesta ponte. O pacote legado separado `vercel-oauth-callback/` não foi modificado.
+
+Diagnóstico reproduziu timeout pelo nome da API usando os proxies afetados, enquanto o domínio Vercel respondeu. Forçar os IPv4 atuais da API mantendo SNI/domínio e validação TLS retornou resposta esperada por ambos. Isso isola falha de resolução/seleção de endereço no caminho do proxy; não identifica qual resolvedor originou a falha nem demonstra reputação ruim/bloqueio da VPS. Firewall VPS sem regras ativas e API local responsiva. Seis testes Node com dados sintéticos aprovados. Publicação e teste pelos proxies pendentes nesta preparação.
 
 ## Conexão
 
