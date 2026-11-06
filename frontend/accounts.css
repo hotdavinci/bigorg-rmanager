@@ -15,3 +15,5 @@
 .account-group form { display: flex; flex-wrap: wrap; gap: 8px; }
 
 .account-nickname{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}.account-nickname input{width:220px;max-width:100%;min-width:0}.account-nickname button{padding:8px 12px}
+
+.accounts-archive{margin-top:36px;padding-top:24px;border-top:1px solid #39364e}.account-archived{background:#1b1c29;border-color:#3d3a50}.tag.tag-archived{background:#343044;color:#d3cbe4}

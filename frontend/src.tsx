@@ -2506,8 +2506,11 @@ function AccountsPage({
     const timestamp = Date.parse(/(?:Z|[+-]\d{2}:\d{2})$/.test(value) ? value : `${value}Z`);
     return Number.isFinite(timestamp) ? timestamp : 0;
   };
-  const accounts = allAccounts.filter((account: any) => account.apta)
-    .sort((a: any, b: any) => linkedAt(b) - linkedAt(a) || b.id - a.id);
+  const newestFirst = (a: any, b: any) => linkedAt(b) - linkedAt(a) || b.id - a.id;
+  const accounts = allAccounts.filter((account: any) => account.apta && !account.reel_limit_reached)
+    .sort(newestFirst);
+  const archived = allAccounts.filter((account: any) => account.reel_limit_reached)
+    .sort(newestFirst);
   const [selectedIdsState, setSelectedIds] = useState<number[]>([]);
   const selectedIds = selectedIdsState.filter((id) => accounts.some((account: any) => account.id === id));
   const [delay, setDelay] = useState("1");
@@ -2530,9 +2533,9 @@ function AccountsPage({
     (account: any) => selectedIds.includes(account.id),
   );
   const active = accounts.filter((account: any) => account.apta);
-  const render = (account: any) => (
-    <article className="account-choice" key={account.id}>
-      <input
+  const render = (account: any, isArchived = false) => (
+    <article className={`account-choice${isArchived ? " account-archived" : ""}`} key={account.id}>
+      {!isArchived && <input
         className="account-select"
         type="checkbox"
         aria-label={`Selecionar @${account.username || account.nome}`}
@@ -2542,7 +2545,7 @@ function AccountsPage({
             ? ids.filter((id) => id !== account.id)
             : [...ids, account.id],
         )}
-      />
+      />}
       <div className="account-details">
         <b>{account.nickname ? `${account.nickname} · @${account.username || account.nome}` : `@${account.username || account.nome}`}</b>
         <form className="account-nickname" key={`${account.id}-${account.nickname || ""}`} onSubmit={async (event) => {
@@ -2558,6 +2561,7 @@ function AccountsPage({
         </form>
         <small>{account.published_reels ?? 0} Reels publicados pelo Rmanager{account.reel_limit ? ` / limite de ${account.reel_limit}` : " · Sem limite"}
           {account.reel_limit_reached ? " · LIMITE ATINGIDO — publicações e entrada em campanhas bloqueadas" : ""}</small>
+        {isArchived && account.account_group && <small>Grupo: {account.account_group}</small>}
         <small>Vinculada via OAuth em: {account.conectada_em ? eventDate(account.conectada_em) : "Data não disponível"}</small>
         <small>Postar após {account.effective_delay_days} dia(s) da vinculação · {account.posting_delay_days == null ? "Padrão global" : "Prazo da conta"}
           {account.sincronizacao_devida_em ? ` · Liberada em ${eventDate(account.sincronizacao_devida_em)}` : ""}
@@ -2570,8 +2574,8 @@ function AccountsPage({
         </small>
       </div>
       <span className="row-actions">
-        <span className={`tag ${account.apta && !account.reel_limit_reached ? "" : "tag-error"}`}>
-          {account.reel_limit_reached ? "LIMITE ATINGIDO" : account.apta ? "APTA A PUBLICAR" : account.status || "COM ERRO"}
+        <span className={`tag ${isArchived ? "tag-archived" : account.apta ? "" : "tag-error"}`}>
+          {isArchived ? "ARQUIVADA · LIMITE ATINGIDO" : account.apta ? "APTA A PUBLICAR" : account.status || "COM ERRO"}
         </span>
         {account.apta && (
           <button
@@ -2609,7 +2613,7 @@ function AccountsPage({
           </button>
         </div>
       </div>
-      <p className="muted">Somente contas aptas · Mais recentes primeiro em cada grupo, pela vinculação OAuth.</p>
+      <p className="muted">Contas disponíveis para publicar · Mais recentes primeiro em cada grupo. Contas no limite ficam em Arquivadas, ao final.</p>
       <div className="toolbar account-toolbar">
         <button
           className="secondary"
@@ -2660,10 +2664,16 @@ function AccountsPage({
               <button disabled={saving}>Renomear grupo</button>
             </form>}
           </div>
-          {!!healthy.length && <><h3>Contas aptas</h3><div className="account-list">{healthy.map(render)}</div></>}
+          {!!healthy.length && <><h3>Contas aptas</h3><div className="account-list">{healthy.map((account: any) => render(account))}</div></>}
         </section>;
       })}
-      {!accounts.length && <Empty text="Nenhuma conta apta no momento. Contas com erro estão ocultas." />}
+      {!accounts.length && <Empty text="Nenhuma conta disponível para publicar. Contas no limite estão em Arquivadas; demais contas com erro estão ocultas." />}
+      <section className="account-group accounts-archive" aria-label="Contas arquivadas">
+        <h2>Arquivadas ({archived.length})</h2>
+        <p className="muted">Contas que atingiram o limite de Reels. Não publicam nem entram em novas campanhas enquanto estiverem no limite.</p>
+        {archived.length ? <div className="account-list">{archived.map((account: any) => render(account, true))}</div>
+          : <Empty text="Nenhuma conta arquivada por limite de Reels." />}
+      </section>
     </div>
   );
 }

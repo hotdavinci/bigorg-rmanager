@@ -2,11 +2,15 @@
 
 ## Resumo
 
-Conexão Meta, ponte OAuth para proxies com falha de DNS, armazenamento de tokens, seleção/exclusão, grupos com título, apelidos individuais, prazo prioritário por conta, limite acumulado de Reels e recuperação. Consulte ao alterar a tela de contas, autenticação e callbacks.
+Conexão Meta, ponte OAuth para proxies com falha de DNS, armazenamento de tokens, seleção/exclusão, grupos com título, apelidos individuais, prazo prioritário por conta, limite acumulado de Reels, arquivamento por limite e recuperação. Consulte ao alterar a tela de contas, autenticação e callbacks.
 
 ## Contas com limite atingido — 04/11/2026
 
-A tela Contas mostra total local publicado, limite vigente e aviso `LIMITE ATINGIDO`. Contas saudáveis continuam visíveis mesmo bloqueadas por quantidade. `apta` mantém a semântica legada de saúde/conexão; `reel_limit_reached` informa o bloqueio adicional. O bloqueio não grava erro de acesso nem desativa a conta; reconexão não zera seu total. O número de contas aptas no dashboard considera também o limite. Consulte [Publicação](publicacao.md#limite-total-por-conta--04112026) para origem do contador e desbloqueio da fila.
+A tela Contas separa contas no limite na seção **Arquivadas**, ao final, ordenadas pela vinculação OAuth mais recente. Exibe total local publicado, limite, grupo e aviso `ARQUIVADA · LIMITE ATINGIDO`; elas saem dos grupos disponíveis, seleção em lote e botão de abrir todas as aptas. Apelido, abertura individual e exclusão individual permanecem disponíveis. Contas no limite aparecem nessa seção mesmo se deixarem de estar saudáveis; demais contas com erro continuam ocultas.
+
+O arquivamento é uma classificação automática pelo campo `reel_limit_reached`, sem nova flag, migração, exclusão ou alteração de vínculos/filas. Aumentar/desativar o limite pode devolver uma conta saudável à lista disponível. `apta` mantém a semântica legada de saúde/conexão. O bloqueio existente não grava erro nem desativa a conta; reconexão não zera o total. O número de contas aptas no dashboard considera também o limite. Consulte [Publicação](publicacao.md#limite-total-por-conta--04112026) para origem do contador e desbloqueio da fila.
+
+Validação: build frontend aprovado e renderização React com contas sintéticas confirmou partição, exclusão da seleção e arquivamento de conta no limite mesmo inativa. Sem alteração de contas reais.
 
 
 ## Conexão com proxy e DNS — 05/11/2026
