@@ -2,7 +2,7 @@
 
 ## Resumo
 
-Visão do backend, frontend, banco, serviços e atualização dos formulários. Consulte para localizar responsabilidades e entender o fluxo completo.
+Visão do backend, frontend, banco, serviços, disponibilidade e atualização dos formulários. Consulte para localizar responsabilidades e entender o fluxo completo.
 
 ## Componentes
 
@@ -13,6 +13,16 @@ frontend/src.tsx implementa a interface React: painel, contas, biblioteca, campa
 ## Rascunhos de Configurações
 
 O painel atualiza dados de acompanhamento a cada cinco segundos, mas carrega os valores editáveis de Configurações uma vez após autenticar. Enquanto a leitura inicial não termina, o formulário não aparece; uma falha oferece nova tentativa. Alterações de limite total de Reels por conta, prazo, janelas, estratégia, scripts, capa e legendas permanecem no estado local até o respectivo botão Salvar; somente a resposta desse salvamento substitui o rascunho. A atualização periódica não reaplica os valores persistidos durante a edição.
+
+## Disponibilidade e atualização — 05/11/2026
+
+A verificação de autenticação exibe estado de conexão e, após dez segundos sem resposta, oferece nova tentativa. Uma falha de rede não é tratada como logout. Consultas GET têm timeout de trinta segundos; escritas mantêm seu comportamento anterior. O acompanhamento periódico só começa após autenticar e aguarda terminar uma rodada antes de iniciar outra, evitando acumular consultas quando o backend demora.
+
+`run_account_health_check` executa a rotina completa em uma thread dedicada por `asyncio.to_thread`: sessão SQLite e clientes HTTP são criados/usados/fechados dentro desse trabalho. Esperas por commit e retries dessa rotina deixam de bloquear o event loop HTTP e de mídia. A classificação de saúde, locks e cadência permanecem iguais; isso não migra todas as operações síncronas da aplicação nem elimina a possibilidade de contenção SQLite.
+
+Agenda e Atividade usam `post_history_rows`, uma consulta com joins e a tentativa de maior ID por post. Preservam campos, posts sem conta encontrada, ordenação e o limite final de cem itens da Atividade, substituindo consultas individuais por post. Não há alteração de contrato, paginação ou descarte de histórico.
+
+O diagnóstico por SSH encontrou a thread principal no commit inicial de `run_account_health_check` em três amostras e reproduziu timeout de autenticação no loopback. Também encontrou consultas concorrentes por post na agenda. Serviços ativos e HTTP 200 de HTML/OpenAPI não comprovam funcionamento do painel. Três testes sintéticos verificam responsividade durante commit bloqueado, consulta única da agenda e ordenação/tentativa do histórico; build aprovado. A suíte de 85 testes teve 84 aprovados e uma falha anterior em fixture de mídia sem campo `status`. Backend implantado com backup e reinício controlado: autenticação local em ~2 ms, agenda em ~98 ms e autenticação pública em ~0,60 s. Mídia voltou a responder 404 esperado na raiz. Frontend ainda aguarda publicação nesta etapa; nenhuma publicação Meta/OAuth foi executada para validar.
 
 ## Caminho funcional
 

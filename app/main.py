@@ -484,6 +484,16 @@ async def insights_scheduler():
         await asyncio.sleep(300)
 
 async def run_account_health_check(force: bool=False) -> dict|None:
+    # Keep this routine's SQLite waits off the HTTP/media event loop. Its
+    # sessions and HTTP clients are created and closed inside the worker.
+    return await asyncio.to_thread(_account_health_worker, force)
+
+
+def _account_health_worker(force: bool=False):
+    return asyncio.run(_run_account_health_check(force))
+
+
+async def _run_account_health_check(force: bool=False) -> dict|None:
     """Verify publish tokens without keeping SQLite write locks during HTTP calls."""
     now=datetime.utcnow(); lock_name="instagram-account-health"
     with DbSession() as session:
@@ -1137,18 +1147,28 @@ def insight_views_chart(period:str="24h",start:str|None=None,end:str|None=None,s
     else:
         points=[{"date":key.isoformat(),"views":views} for key,views in totals.items()]
     return {"period":period,"points":points}
+def post_history_rows(s: Session):
+    # One bulk query replaces per-post reads, including the latest attempt.
+    latest=select(PublicationAttempt.post_id,func.max(PublicationAttempt.id).label("attempt_id")).group_by(PublicationAttempt.post_id).subquery()
+    return s.execute(select(ScheduledPost,Campaign,InstagramAccount,Media,PublicationAttempt)
+        .outerjoin(Campaign,Campaign.id==ScheduledPost.campaign_id)
+        .outerjoin(InstagramAccount,InstagramAccount.id==ScheduledPost.account_id)
+        .outerjoin(Media,Media.id==ScheduledPost.processed_media_id)
+        .outerjoin(latest,latest.c.post_id==ScheduledPost.id)
+        .outerjoin(PublicationAttempt,PublicationAttempt.id==latest.c.attempt_id)
+        .order_by(ScheduledPost.scheduled_for)).all()
+
+
 @app.get("/api/scheduled-posts")
 def scheduled_posts(s:Session=Depends(db)):
-    posts=s.scalars(select(ScheduledPost).order_by(ScheduledPost.scheduled_for)).all()
     result=[]
-    for p in posts:
-        attempt=s.scalar(select(PublicationAttempt).where(PublicationAttempt.post_id==p.id).order_by(PublicationAttempt.id.desc()))
+    for p,campaign,account,media,attempt in post_history_rows(s):
         result.append({
             "id":p.id, "quando":p.scheduled_for, "status":p.status,
-            "campanha":s.get(Campaign,p.campaign_id).name if s.get(Campaign,p.campaign_id) else "",
-            "conta":s.get(InstagramAccount,p.account_id).username if s.get(InstagramAccount,p.account_id) else "",
-            "conta_apta":bool(s.get(InstagramAccount,p.account_id) and account_is_eligible(s.get(InstagramAccount,p.account_id))),
-            "midia":s.get(Media,p.processed_media_id).original_name if s.get(Media,p.processed_media_id) else "",
+            "campanha":campaign.name if campaign else "",
+            "conta":account.username if account else "",
+            "conta_apta":bool(account and account_is_eligible(account)),
+            "midia":media.original_name if media else "",
             "erro":attempt.message if p.status==PostStatus.FAILED and attempt and attempt.status=="FAILED" else "",
         })
     return result
@@ -1158,12 +1178,7 @@ def activity(s:Session=Depends(db)):
     items=[]
     # Ordenamos depois de separar recentes e futuros. Limitar aqui antes da
     # ordenação escondia os primeiros dias de campanhas maiores.
-    posts=s.scalars(select(ScheduledPost)).all()
-    for post in posts:
-        campaign=s.get(Campaign,post.campaign_id)
-        account=s.get(InstagramAccount,post.account_id)
-        media=s.get(Media,post.processed_media_id)
-        attempt=s.scalar(select(PublicationAttempt).where(PublicationAttempt.post_id==post.id).order_by(PublicationAttempt.id.desc()))
+    for post,campaign,account,media,attempt in post_history_rows(s):
         items.append({
             "id":f"post-{post.id}", "status":post.status,
             "title":f"@{account.username if account else 'conta removida'} · {media.original_name if media else 'Mídia removida'}",

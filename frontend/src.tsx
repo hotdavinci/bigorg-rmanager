@@ -1,4 +1,4 @@
-import React, { FormEvent, useEffect, useState } from "react";
+import React, { FormEvent, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   ArrowUpRight,
@@ -36,6 +36,7 @@ const api = (path: string, options?: RequestInit) => {
       : path;
   return fetch(apiUrl(effectivePath), {
     credentials: "include",
+    signal: !options?.method || options.method === "GET" ? AbortSignal.timeout(30000) : undefined,
     ...options,
     // Os cartões e o ranking mudam com o período. Não reutilizamos uma
     // resposta GET antiga do navegador quando o usuário troca o filtro.
@@ -183,6 +184,9 @@ function App() {
   const [setupMedia, setSetupMedia] = useState<number[]>([]);
   const [setupScripts, setSetupScripts] = useState<number[]>([]);
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
+  const [authError, setAuthError] = useState(false);
+  const [authAttempt, setAuthAttempt] = useState(0);
+  const refreshInFlight = useRef(false);
   const [email, setEmail] = useState("hotdavinci@gmail.com");
   const [password, setPassword] = useState("");
   const [scheduleModal, setScheduleModal] = useState<any>(null);
@@ -211,31 +215,39 @@ function App() {
     }
     setCampaignOpenState(open);
   };
-  const refresh = () => {
-    api(`/dashboard?period=${homePeriod}`).then(setDashboard);
-    api("/meta/accounts").then(setAccounts);
-    api("/media?kind=original").then(setMedia);
-    api("/campaigns").then(setCampaigns);
-    api("/scripts").then(setScripts);
-    api("/caption-lists").then(setCaptionLists);
-    api("/scheduled-posts").then(setAgenda);
-    api("/activity").then(setActivity);
-    api("/activity/summary").then(setActivitySummary);
-    api(`/insights/reels?period=${insightPeriod}`)
-      .then(setInsights)
-      .catch(() => {});
-    api("/tunnel/status").then(setTunnel);
+  const refresh = async () => {
+    if (authenticated !== true || refreshInFlight.current) return;
+    refreshInFlight.current = true;
+    try {
+      await Promise.allSettled([
+        api(`/dashboard?period=${homePeriod}`).then(setDashboard),
+        api("/meta/accounts").then(setAccounts),
+        api("/media?kind=original").then(setMedia),
+        api("/campaigns").then(setCampaigns),
+        api("/scripts").then(setScripts),
+        api("/caption-lists").then(setCaptionLists),
+        api("/scheduled-posts").then(setAgenda),
+        api("/activity").then(setActivity),
+        api("/activity/summary").then(setActivitySummary),
+        api(`/insights/reels?period=${insightPeriod}`).then(setInsights),
+        api("/tunnel/status").then(setTunnel),
+      ]);
+    } finally { refreshInFlight.current = false; }
   };
-  useEffect(refresh, []);
   useEffect(() => {
+    if (authenticated !== true) return;
+    refresh();
     const timer = window.setInterval(refresh, 5000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [authenticated, homePeriod, insightPeriod]);
   useEffect(() => {
-    api("/auth/status")
-      .then((result) => setAuthenticated(result.authenticated))
-      .catch(() => setAuthenticated(false));
-  }, []);
+    let cancelled = false;
+    setAuthError(false);
+    api("/auth/status", { signal: AbortSignal.timeout(10000) })
+      .then((result) => { if (!cancelled) setAuthenticated(result.authenticated); })
+      .catch(() => { if (!cancelled) setAuthError(true); });
+    return () => { cancelled = true; };
+  }, [authAttempt]);
   useEffect(() => {
     if (authenticated !== true) return;
     let cancelled = false;
@@ -258,12 +270,13 @@ function App() {
     return () => { cancelled = true; };
   }, [authenticated, settingsLoadAttempt]);
   useEffect(() => {
+    if (authenticated !== true) return;
     api(`/insights/reels?period=${insightPeriod}`)
       .then(setInsights)
       .catch(() => {});
-  }, [insightPeriod]);
+  }, [authenticated, insightPeriod]);
   useEffect(() => {
-    if (page !== "Início") return;
+    if (authenticated !== true || page !== "Início") return;
     // Um período anterior pode responder depois do novo se a conexão oscilar.
     // Só aplicamos ao painel a resposta pertencente ao filtro atual.
     let cancelled = false;
@@ -280,13 +293,13 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [page, homePeriod]);
+  }, [authenticated, page, homePeriod]);
   useEffect(() => {
-    if (page !== "Início") return;
+    if (authenticated !== true || page !== "Início") return;
     api(`/insights/views-chart?period=${homePeriod}`)
       .then(setViewsChart)
       .catch(() => {});
-  }, [page, homePeriod]);
+  }, [authenticated, page, homePeriod]);
   useEffect(() => {
     if (page !== "Insights") return;
     let cancelled = false;
@@ -839,7 +852,13 @@ function App() {
       setNotice(error.message);
     }
   };
-  if (authenticated === null) return null;
+  if (authenticated === null) return (
+    <div className="login-page"><div className="modal">
+      <h1>Reels Manager</h1>
+      <p role="status">{authError ? "O servidor não respondeu. Tente novamente em instantes." : "Conectando ao servidor..."}</p>
+      {authError && <button onClick={() => setAuthAttempt((value) => value + 1)}>Tentar novamente</button>}
+    </div></div>
+  );
   if (!authenticated)
     return (
       <div className="login-page">
