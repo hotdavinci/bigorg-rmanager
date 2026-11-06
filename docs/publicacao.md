@@ -17,7 +17,7 @@ A conta mantém saúde, token, vínculos e fila existente; limite não é falha 
 Validação local: 12 testes novos sintéticos aprovados; build TypeScript/Vite aprovado. A suíte ampliada executou 82 testes: 81 passaram e um teste anterior de conexão de mídia falhou por fixture sem `status` (`test_media_connections.py`), em trecho não alterado nesta entrega. Sem publicação real, sincronização externa, deploy ou leitura de dados/configuração reais.
 
 
-Implantação em 05/11/2026: backend ativo na VPS e rota confirmada no OpenAPI (HTTP 200), com backup protegido de código. Entrada de novos trabalhos pausada temporariamente para drenar os envios em andamento e estados de campanha restaurados após a atualização. Build e 12 testes do candidato remoto aprovados; 81 testes passaram excluindo o teste anterior de mídia com fixture incompleta. Envio ao Git e confirmação do bundle público em acompanhamento; nenhum limite real alterado nem publicação manual de teste.
+Implantação em 05/11/2026: backend ativo na VPS e rota confirmada no OpenAPI (HTTP 200), com backup protegido de código. Entrada de novos trabalhos pausada temporariamente para drenar os envios em andamento e estados de campanha restaurados após a atualização. Build e 12 testes do candidato remoto aprovados; 81 testes passaram excluindo o teste anterior de mídia com fixture incompleta. Commit `6e5fcd9` enviado ao main; deploy Vercel success e bundle público confirmado com o formulário/rota do limite. OpenAPI da API pública também confirmou a nova rota. Nenhum limite real alterado nem publicação manual de teste.
 
 ## Reivindicação
 
