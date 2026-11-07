@@ -590,6 +590,7 @@ function App() {
     try {
       const action = deleteModal.action;
       let mediaDeletion: any = null;
+      let pendingCleanup = false;
       if (action === "account")
         await api(`/meta/accounts/${deleteModal.id}`, { method: "DELETE" });
       else if (action === "script")
@@ -602,9 +603,10 @@ function App() {
         await api("/activity", { method: "DELETE" });
       else {
         const cancel = action === "cancel";
-        await api(`/campaigns/${deleteModal.id}${cancel ? "/cancel" : ""}`, {
+        const result = await api(`/campaigns/${deleteModal.id}${cancel ? "/cancel" : ""}`, {
           method: cancel ? "POST" : "DELETE",
         });
+        pendingCleanup = !!result.pending_cleanup;
       }
       setDeleteModal(null);
       setNotice(
@@ -620,11 +622,14 @@ function App() {
                   ? `Mídia excluída da biblioteca.${mediaDeletion?.detached_campaigns ? ` Removida de ${mediaDeletion.detached_campaigns} campanha(s); posts já agendados foram mantidos.` : ""}`
                   : action === "cancel"
                     ? "Campanha cancelada e agendamentos interrompidos."
-                    : "Campanha excluída.",
+                    : pendingCleanup
+                      ? "Exclusão solicitada. A campanha será removida quando o processamento atual terminar."
+                      : "Campanha excluída.",
       );
       refresh();
     } catch (error: any) {
       setNotice(error.message);
+      throw error;
     }
   };
   const removeMedia = (item: any) =>
@@ -2911,6 +2916,23 @@ function ScheduleDialog({
   );
 }
 function DeleteDialog({ campaign, cancel, confirm }: any) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const submitting = useRef(false);
+  const submit = async () => {
+    if (submitting.current) return;
+    submitting.current = true;
+    setBusy(true);
+    setError("");
+    try {
+      await confirm();
+    } catch (failure: any) {
+      setError(failure?.message || "Não foi possível concluir. Tente novamente.");
+    } finally {
+      submitting.current = false;
+      setBusy(false);
+    }
+  };
   const action = campaign.action;
   const content =
     action === "history"
@@ -2959,12 +2981,14 @@ function DeleteDialog({ campaign, cancel, confirm }: any) {
       <div className="modal">
         <h2>{content[0]}</h2>
         <p>{content[1]}</p>
+        {busy && <p role="status">Aguardando o servidor concluir a solicitação…</p>}
+        {error && <p role="alert">Não foi possível concluir: {error}</p>}
         <div className="modal-actions">
-          <button className="secondary" onClick={cancel}>
+          <button type="button" className="secondary" onClick={cancel} disabled={busy}>
             Voltar
           </button>
-          <button className="danger" onClick={confirm}>
-            {content[2]}
+          <button type="button" className="danger" onClick={submit} disabled={busy}>
+            {busy ? "Aguarde…" : content[2]}
           </button>
         </div>
       </div>

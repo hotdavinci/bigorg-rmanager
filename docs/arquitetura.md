@@ -2,13 +2,19 @@
 
 ## Resumo
 
-Visão do backend, frontend, banco, serviços, disponibilidade e atualização dos formulários. Consulte para localizar responsabilidades e entender o fluxo completo.
+Visão do backend, frontend, banco, serviços, disponibilidade, confirmações de exclusão e atualização dos formulários. Consulte para localizar responsabilidades e entender o fluxo completo.
 
 ## Componentes
 
 app/main.py expõe a API e coordena biblioteca, contas, campanhas, agenda, processamento, publicação e métricas. app/models.py define entidades SQLAlchemy; app/services.py prepara mídias e executa scripts. app/meta.py encapsula OAuth, chamadas oficiais e publicação. Gateway de mídia e túnel dão acesso temporário aos arquivos necessários à publicação.
 
 frontend/src.tsx implementa a interface React: painel, contas, biblioteca, campanhas, agenda, métricas e atividade. O frontend chama a API; a existência de um botão não demonstra que credenciais, permissões ou rede estejam disponíveis.
+
+## Confirmação de exclusão — 07/11/2026
+
+A confirmação individual mostra espera enquanto a requisição está em andamento, bloqueia envios duplicados e apresenta a falha dentro da própria janela, permitindo nova tentativa. Antes, o erro era enviado somente ao aviso da página principal, que não é renderizada enquanto a confirmação está aberta. Campanhas em processamento cuja API responde `pending_cleanup` exibem exclusão solicitada, aguardando o lote terminar, em vez de remoção já concluída. Não há timeout novo para escritas nem repetição automática da exclusão.
+
+Build TypeScript/Vite aprovado. Diagnóstico operacional confirmou `PermissionError` ao remover arquivos processados de duas campanhas de teste já concluídas: diretórios criados como root, serviço executando como reels. Corrigido somente o proprietário dos dois diretórios de trabalho e seus arquivos, sem ampliar permissões globais. Backup privado anterior à exclusão em `/root/rmanager-campaign-delete-20261107`; ambas removidas pela rotina existente sob o usuário do serviço, confirmando zero campanhas restantes. Sem publicação Meta ou sincronização de teste. Publicação da interface em acompanhamento.
 
 ## Rascunhos de Configurações
 
