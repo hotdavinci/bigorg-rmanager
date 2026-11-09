@@ -21,9 +21,21 @@ class InstagramAccount(Base):
     posting_delay_days: Mapped[float|None]=mapped_column(Float,nullable=True)
     nickname: Mapped[str]=mapped_column(String(120),default="",server_default="")
     account_group: Mapped[str]=mapped_column(String(120),default="",server_default="")
+    meta_app_id: Mapped[int|None]=mapped_column(ForeignKey("meta_apps.id"))
+
+class MetaApp(Base):
+    __tablename__="meta_apps"
+    id: Mapped[int]=mapped_column(primary_key=True)
+    instagram_client_id: Mapped[str]=mapped_column(String(100), unique=True)
+    encrypted_secret: Mapped[str]=mapped_column(Text)
+
 class OAuthState(Base):
     __tablename__="oauth_states"
     state: Mapped[str]=mapped_column(String(128), primary_key=True); created_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
+    meta_app_id: Mapped[int|None]=mapped_column(ForeignKey("meta_apps.id"))
+    expected_account_id: Mapped[int|None]=mapped_column(ForeignKey("instagram_accounts.id"))
+    client_id: Mapped[str|None]=mapped_column(String(100))
+    redirect_uri: Mapped[str|None]=mapped_column(Text)
 class Script(Base):
     __tablename__="processing_scripts"
     id: Mapped[int]=mapped_column(primary_key=True); name: Mapped[str]=mapped_column(String(120)); description: Mapped[str]=mapped_column(Text, default=""); relative_path: Mapped[str]=mapped_column(String(500), unique=True); active: Mapped[bool]=mapped_column(Boolean, default=True); created_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)

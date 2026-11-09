@@ -1,6 +1,7 @@
 import asyncio, shutil, uuid, secrets, os, sys, subprocess, json, threading, re
 from contextlib import asynccontextmanager
 from datetime import datetime, date, time, timedelta, timezone
+from html import escape
 import random
 from pathlib import Path
 from urllib.parse import urlparse
@@ -14,10 +15,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select, delete, func, text, update, or_
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from .config import settings, ROOT, reload_runtime_settings, data_path
 from .db import Base, engine, Session as DbSession
 from .models import Media, Script, Campaign, CampaignStatus, ScheduledPost, PostStatus, InstagramAccount, OAuthState, CampaignAccount, CampaignAccountExclusion, SchedulerLock, AuditLog, InstagramReel, InstagramReelSnapshot, CampaignSourceMedia, CampaignScript, ProcessingExecution, CampaignScheduleRule, ProcessedCover, ScheduledPostCover, PublicationAttempt, CaptionList, ApplicationSetting
+from .models import MetaApp
 from .media_deletion import DELETED_STATUS, cleanup_deleted_original_files, delete_library_media
 from .services import dirs, copy_media, process, process_slot, process_slots_batch, thumbnail, commit_with_retry
 from . import meta
@@ -718,6 +720,17 @@ async def life(app):
         if "nickname" not in account_columns: connection.exec_driver_sql("ALTER TABLE instagram_accounts ADD COLUMN nickname VARCHAR(120) NOT NULL DEFAULT ''")
         if "account_group" not in account_columns: connection.exec_driver_sql("ALTER TABLE instagram_accounts ADD COLUMN account_group VARCHAR(120) NOT NULL DEFAULT ''")
         if "deleted_at" not in account_columns: connection.exec_driver_sql("ALTER TABLE instagram_accounts ADD COLUMN deleted_at DATETIME")
+        if "meta_app_id" not in account_columns:
+            connection.exec_driver_sql("ALTER TABLE instagram_accounts ADD COLUMN meta_app_id INTEGER REFERENCES meta_apps(id)")
+        state_columns={row[1] for row in connection.exec_driver_sql("PRAGMA table_info(oauth_states)")}
+        for name, definition in (
+            ("meta_app_id", "INTEGER REFERENCES meta_apps(id)"),
+            ("expected_account_id", "INTEGER REFERENCES instagram_accounts(id)"),
+            ("client_id", "VARCHAR(100)"),
+            ("redirect_uri", "TEXT"),
+        ):
+            if name not in state_columns:
+                connection.exec_driver_sql(f"ALTER TABLE oauth_states ADD COLUMN {name} {definition}")
         post_columns={row[1] for row in connection.exec_driver_sql("PRAGMA table_info(scheduled_posts)")}
         if "next_attempt_at" not in post_columns: connection.exec_driver_sql("ALTER TABLE scheduled_posts ADD COLUMN next_attempt_at DATETIME")
         if "last_error" not in post_columns: connection.exec_driver_sql("ALTER TABLE scheduled_posts ADD COLUMN last_error TEXT NOT NULL DEFAULT ''")
@@ -914,11 +927,10 @@ def restart_app():
 @app.get("/api/meta/accounts")
 def accounts(s:Session=Depends(db)):
     now=datetime.utcnow()
-    return [{"published_reels":published_total(s,a.id),"reel_limit":reel_limit(s),"reel_limit_reached":limit_reached(s,a.id),"nickname":a.nickname,"posting_delay_days":a.posting_delay_days,"effective_delay_days":account_campaign_sync_delay_days(s,a),"account_group":a.account_group,"id":a.id,"username":a.username,"nome":a.display_name,"ativo":a.active,"conectada_em":a.connected_at,"expira_em":a.token_expires_at,"verificada_em":a.last_verified_at,"erro":a.last_error,"sincronizacao_devida_em":a.campaign_sync_due_at,"sincronizada_em":a.campaign_sync_completed_at,"apta":account_is_eligible(a,now),"status":"APTA" if account_is_eligible(a,now) else ("TOKEN_EXPIRADO" if a.token_expires_at and a.token_expires_at<=now else "COM_ERRO" if a.last_error else "DESCONECTADA")} for a in s.scalars(select(InstagramAccount).where(InstagramAccount.deleted_at.is_(None)).order_by(InstagramAccount.connected_at.desc()))]
+    return [{"published_reels":published_total(s,a.id),"reel_limit":reel_limit(s),"reel_limit_reached":limit_reached(s,a.id),"nickname":a.nickname,"posting_delay_days":a.posting_delay_days,"effective_delay_days":account_campaign_sync_delay_days(s,a),"account_group":a.account_group,"meta_app":meta_app_alias(a.meta_app_id),"id":a.id,"username":a.username,"nome":a.display_name,"ativo":a.active,"conectada_em":a.connected_at,"expira_em":a.token_expires_at,"verificada_em":a.last_verified_at,"erro":a.last_error,"sincronizacao_devida_em":a.campaign_sync_due_at,"sincronizada_em":a.campaign_sync_completed_at,"apta":account_is_eligible(a,now),"status":"APTA" if account_is_eligible(a,now) else ("TOKEN_EXPIRADO" if a.token_expires_at and a.token_expires_at<=now else "COM_ERRO" if a.last_error else "DESCONECTADA")} for a in s.scalars(select(InstagramAccount).where(InstagramAccount.deleted_at.is_(None)).order_by(InstagramAccount.connected_at.desc()))]
 
 class AccountNicknameIn(BaseModel):
     nickname: str = Field(max_length=120)
-
 
 @app.put("/api/meta/accounts/{account_id}/nickname")
 def save_account_nickname(account_id:int,body:AccountNicknameIn,s:Session=Depends(db)):
@@ -986,36 +998,144 @@ def save_account_campaign_sync_settings(delay_days:float=Body(...,embed=True,ge=
     commit_with_retry(s)
     return {"delay_days":delay_days}
 @app.get("/api/meta/oauth/start")
-def oauth_start(s:Session=Depends(db)):
-    # OAuth settings can be changed through .env without taking the local app down.
-    reload_runtime_settings()
-    meta.require_config(); state=secrets.token_urlsafe(32); s.add(OAuthState(state=state)); s.commit()
-    return RedirectResponse(meta.authorization_url(state))
+def oauth_start(app:str="app-1",s:Session=Depends(db)):
+    return RedirectResponse(create_meta_oauth_url(s,app),headers={"Cache-Control":"no-store"})
+
 @app.get("/api/meta/oauth/url")
-def oauth_url(s:Session=Depends(db)):
+def oauth_url(request:Request,app:str|None=None,account_id:int|None=None,s:Session=Depends(db)):
     """Cria um link de autorização de uso único para ser aberto em qualquer navegador."""
+    if account_id is None:
+        return {"url":create_meta_oauth_url(s,app if app is not None else "app-1")}
+    require_meta_admin(request)
+    account=s.get(InstagramAccount,account_id)
+    if not account or account.deleted_at is not None:
+        raise HTTPException(404,"Conta não encontrada.")
+    return {"url":create_meta_oauth_url(s,meta_app_alias(account.meta_app_id),account_id)}
+
+def require_meta_admin(request:Request) -> None:
+    if not settings.admin_password or request.session.get("user") != settings.admin_email:
+        raise HTTPException(401,"Entre como administrador para gerenciar os Apps Meta.")
+
+def meta_app_alias(app_id:int|None) -> str:
+    return f"app-{app_id+1}" if app_id is not None else "app-1"
+
+def find_meta_app(s:Session,alias:str) -> MetaApp|None:
+    if alias == "app-1":
+        return None
+    if re.fullmatch(r"app-[1-9][0-9]{0,17}",alias):
+        item=s.get(MetaApp,int(alias[4:])-1)
+        if item:
+            return item
+    raise HTTPException(404,"App Meta não encontrado.")
+
+def create_meta_oauth_url(s:Session,alias:str,account_id:int|None=None) -> str:
     reload_runtime_settings()
-    meta.require_config(); state=secrets.token_urlsafe(32); s.add(OAuthState(state=state)); s.commit()
-    return {"url":meta.authorization_url(state)}
+    item=find_meta_app(s,alias)
+    client_id=item.instagram_client_id if item else meta.default_client_id()
+    if not client_id or (item is None and not meta.default_client_secret()) or not settings.meta_graph_api_version:
+        raise HTTPException(503,"App Meta ainda não configurado para conexão.")
+    meta.cipher()
+    state=secrets.token_urlsafe(32)
+    redirect_uri=settings.meta_redirect_uri
+    s.add(OAuthState(state=state,meta_app_id=item.id if item else None,
+                     expected_account_id=account_id,client_id=client_id,redirect_uri=redirect_uri))
+    s.execute(delete(OAuthState).where(OAuthState.created_at < datetime.utcnow()-timedelta(minutes=15)))
+    s.commit()
+    return meta.authorization_url(state,client_id,redirect_uri)
+
+@app.get("/api/meta/apps",dependencies=[Depends(require_meta_admin)])
+def list_meta_apps(s:Session=Depends(db)):
+    counts=dict(s.execute(select(InstagramAccount.meta_app_id,func.count()).where(
+        InstagramAccount.deleted_at.is_(None)).group_by(InstagramAccount.meta_app_id)).all())
+    return {
+        "redirect_uri":settings.meta_redirect_uri,
+        "apps":[{"alias":"app-1","default":True,"accounts":counts.get(None,0),
+                 "configured":bool(meta.default_client_id() and meta.default_client_secret())}]
+               + [{"alias":meta_app_alias(item.id),"default":False,"accounts":counts.get(item.id,0),
+                   "configured":True,"instagram_client_id":item.instagram_client_id}
+                  for item in s.scalars(select(MetaApp).order_by(MetaApp.id))],
+    }
+
+def encrypt_meta_app_secret(body:dict) -> str:
+    secret=body.get("instagram_client_secret")
+    if not isinstance(secret,str) or not 1 <= len(secret.strip()) <= 500:
+        raise HTTPException(422,"Informe o Instagram App Secret.")
+    return meta.encrypt(secret.strip())
+
+@app.post("/api/meta/apps",status_code=201,dependencies=[Depends(require_meta_admin)])
+def add_meta_app(body:dict,s:Session=Depends(db)):
+    client_id=body.get("instagram_client_id")
+    if not isinstance(client_id,str) or not re.fullmatch(r"[0-9]{1,100}",client_id.strip()):
+        raise HTTPException(422,"Informe o Instagram App ID numérico.")
+    client_id=client_id.strip()
+    if client_id == meta.default_client_id():
+        raise HTTPException(409,"Este Instagram App ID já está cadastrado como app padrão.")
+    item=MetaApp(instagram_client_id=client_id,encrypted_secret=encrypt_meta_app_secret(body))
+    s.add(item)
+    try:
+        s.commit()
+    except IntegrityError:
+        s.rollback()
+        raise HTTPException(409,"Este Instagram App ID já está cadastrado.") from None
+    return {"alias":meta_app_alias(item.id)}
+
+@app.put("/api/meta/apps/{alias}/secret",dependencies=[Depends(require_meta_admin)])
+def replace_meta_app_secret(alias:str,body:dict,s:Session=Depends(db)):
+    item=find_meta_app(s,alias)
+    if item is None:
+        raise HTTPException(409,"O app padrão é gerenciado pela configuração do servidor.")
+    item.encrypted_secret=encrypt_meta_app_secret(body)
+    s.commit()
+    return {"ok":True}
+
 @app.get("/api/meta/oauth/callback", response_class=HTMLResponse)
 async def oauth_callback(code:str|None=None,state:str|None=None,error:str|None=None,s:Session=Depends(db)):
     item=s.get(OAuthState,state) if state else None
-    if not item: return HTMLResponse("<h2>Conexão inválida ou expirada.</h2><p>Volte ao Reels Manager e tente novamente.</p>",400)
-    s.delete(item); s.commit()
+    if not item or not item.client_id or item.created_at < datetime.utcnow()-timedelta(minutes=15):
+        return HTMLResponse("<h2>Conexão inválida ou expirada.</h2><p>Volte ao Reels Manager e tente novamente.</p>",400)
+    app_id,expected_id,client_id,redirect_uri=item.meta_app_id,item.expected_account_id,item.client_id,item.redirect_uri
+    consumed=s.execute(delete(OAuthState).where(OAuthState.state==state)).rowcount
+    s.commit()
+    if not consumed:
+        return HTMLResponse("<h2>Este link de autorização já foi usado.</h2>",400)
     if error or not code: return HTMLResponse("<h2>A conexão foi cancelada pela Meta.</h2><p>Você pode fechar esta janela.</p>",400)
     try:
-        token,expires=await meta.exchange_code(code); profile=await meta.profile(token)
+        reload_runtime_settings()
+        configured_app=s.get(MetaApp,app_id) if app_id is not None else None
+        current_client_id=configured_app.instagram_client_id if configured_app else meta.default_client_id()
+        if (app_id is not None and not configured_app) or client_id != current_client_id:
+            raise HTTPException(409,"O app mudou durante a autorização. Abra um novo link de conexão.")
+        secret=meta.decrypt(configured_app.encrypted_secret) if configured_app else meta.default_client_secret()
+        s.commit()
+        token,expires=await meta.exchange_code(code,client_id,secret,redirect_uri)
+        try:
+            profile=await meta.profile(token)
+        except HTTPException:
+            raise HTTPException(400,"Não foi possível validar o perfil autorizado no Instagram.") from None
+        s.connection().exec_driver_sql("BEGIN IMMEDIATE")
         account=s.scalar(select(InstagramAccount).where(InstagramAccount.meta_account_id==profile["account_id"]))
+        if expected_id is not None and (not account or account.id != expected_id or account.deleted_at is not None):
+            raise HTTPException(409,"Autorize a mesma conta do Instagram selecionada no painel.")
+        if account and account.meta_app_id != app_id:
+            raise HTTPException(409,"Esta conta já tem outro App Meta vinculado. Reconecte pelo painel de Contas.")
         if not account:
-            account=InstagramAccount(meta_account_id=profile["account_id"],encrypted_token=meta.encrypt(token),posting_delay_days=0); s.add(account)
+            username=profile.get("username")
+            if username:
+                possible_duplicate=s.scalar(select(InstagramAccount.id).where(
+                    func.lower(InstagramAccount.username)==username.lower(),
+                    InstagramAccount.meta_app_id.is_distinct_from(app_id),
+                ).limit(1))
+                if possible_duplicate is not None:
+                    raise HTTPException(409,"Já existe uma conta com esse nome de usuário em outro App Meta. Confira o vínculo no painel.")
+            account=InstagramAccount(meta_account_id=profile["account_id"],meta_app_id=app_id,encrypted_token=meta.encrypt(token),posting_delay_days=0); s.add(account)
         else: account.encrypted_token=meta.encrypt(token)
         account.username=profile.get("username",""); account.display_name=profile.get("name",account.username); account.profile_picture_url=profile.get("profile_picture_url",""); account.token_expires_at=expires; account.active=True; account.deleted_at=None; account.connected_at=datetime.utcnow(); account.last_verified_at=datetime.utcnow(); account.last_error=""
         days=schedule_account_campaign_sync(s,account)
         audit(s,"ACCOUNT_RECONNECTED",f"Conta reconectada e validada via OAuth; a preparação das campanhas ativas continuará em segundo plano após o prazo de {days} dia(s).",account_id=account.id)
         commit_with_retry(s)
         queue_account_campaign_sync(account.id)
-        return HTMLResponse("<script>window.opener&&window.opener.location.reload();window.close()</script><h2>Conta conectada com sucesso.</h2><p>Você já pode fechar esta janela e voltar ao Reels Manager.</p>")
-    except HTTPException as e: return HTMLResponse(f"<h2>Não foi possível conectar a conta.</h2><p>{e.detail}</p>",e.status_code)
+        return HTMLResponse("<script>try{window.opener?.location.reload()}catch{}window.close()</script><h2>Conta conectada com sucesso.</h2><p>Você já pode fechar esta janela e voltar ao Reels Manager.</p>")
+    except HTTPException as e: return HTMLResponse(f"<h2>Não foi possível conectar a conta.</h2><p>{escape(str(e.detail))}</p>",e.status_code)
 def delete_account_safely(s: Session, item: InstagramAccount) -> None:
     """Remove the account from operation but retain published Reel history and insights."""
     account_id=item.id

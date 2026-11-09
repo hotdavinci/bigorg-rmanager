@@ -2,11 +2,21 @@
 
 ## Resumo
 
-Conexão Meta, ponte OAuth para proxies com falha de DNS, armazenamento de tokens, seleção/exclusão, grupos com título, apelidos individuais, prazo prioritário por conta, limite acumulado de Reels, arquivamento por limite e recuperação. Consulte ao alterar a tela de contas, autenticação e callbacks.
+Cadastro de apps Meta, links e reconexão por app, ponte OAuth para proxies, tokens, seleção e exclusão de contas, grupos, prazos e arquivamento por limite de Reels. Consulte ao alterar as telas de Contas e Apps Meta, a autenticação ou os callbacks.
+
+## Apps Meta e links por app — 09/11/2026
+
+Em **Configurações → Apps Meta**, o administrador cadastra o Instagram App ID e o Instagram App Secret dos apps adicionais, consulta a contagem de contas vinculadas e copia o link de cada app. O cadastro numera os apps a partir de `app-2`. O `app-1` representa o app padrão da configuração legada. O secret de um app adicional pode ser substituído no painel e fica criptografado com a mesma chave Fernet dos tokens. O endereço de retorno exibido no painel deve ser autorizado no Instagram Login de cada app.
+
+O link público `/api/meta/connect?app=app-2` inicia o OAuth pelo segundo app. Sem parâmetro, vale `app-1`. A ponte encaminha o apelido ao backend, que vincula a escolha ao estado de uso único, válido por 15 minutos. O callback resolve as credenciais no servidor com base nesse estado. Para direcionar novas contas quando um app lotar, o operador passa a compartilhar o link do próximo app.
+
+A conta guarda o app que concluiu sua conexão. A ação **Reconectar** abre a autorização pelo app vinculado e exige o mesmo perfil. Contas legadas sem vínculo explícito usam `app-1` na reconexão. Esse padrão de compatibilidade não identifica retroativamente o emissor de tokens antigos. Contas com erro fora de Arquivadas aparecem na seção recolhida **Contas indisponíveis**, com a ação de reconectar. Uma autorização por outro app não substitui o vínculo de uma conta já reconhecida. Se o identificador mudar entre apps, o callback também recusa a criação quando encontra o mesmo nome de usuário em outro app.
+
+O SQLite adiciona a tabela de apps e campos opcionais nas contas e estados OAuth na inicialização. Tokens e registros anteriores são preservados. Links de autorização pendentes emitidos pela versão anterior precisam ser gerados novamente após a atualização.
 
 ## Contas com limite atingido — 04/11/2026
 
-A tela Contas separa contas no limite na seção **Arquivadas**, ao final, ordenadas pela vinculação OAuth mais recente. Exibe total local publicado, limite, grupo e aviso `ARQUIVADA · LIMITE ATINGIDO`; elas saem dos grupos disponíveis, seleção em lote e botão de abrir todas as aptas. Apelido, abertura individual e exclusão individual permanecem disponíveis. Contas no limite aparecem nessa seção mesmo se deixarem de estar saudáveis; demais contas com erro continuam ocultas.
+A tela Contas separa contas no limite na seção **Arquivadas**, ao final, ordenadas pela vinculação OAuth mais recente. Exibe total local publicado, limite, grupo e aviso `ARQUIVADA · LIMITE ATINGIDO`. Essas contas saem dos grupos disponíveis, da seleção em lote e do botão de abrir todas as aptas. Apelido, abertura individual e exclusão individual permanecem disponíveis. Contas no limite aparecem nessa seção mesmo se deixarem de estar saudáveis.
 
 O arquivamento é uma classificação automática pelo campo `reel_limit_reached`, sem nova flag, migração, exclusão ou alteração de vínculos/filas. Aumentar/desativar o limite pode devolver uma conta saudável à lista disponível. `apta` mantém a semântica legada de saúde/conexão. O bloqueio existente não grava erro nem desativa a conta; reconexão não zera o total. O número de contas aptas no dashboard considera também o limite. Consulte [Publicação](publicacao.md#limite-total-por-conta--04112026) para origem do contador e desbloqueio da fila.
 

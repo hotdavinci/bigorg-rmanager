@@ -2,7 +2,13 @@
 
 ## Resumo
 
-Campos e tipos sem valores reais, preferências em lote de contas, limite de Reels e rotas da API. Consulte para localizar contratos antes de mudar formato/API.
+Campos e tipos sem valores reais, apps Meta, preferências de contas, limite de Reels e rotas da API. Consulte antes de mudar formatos ou rotas.
+
+## Apps Meta
+
+As rotas administrativas `GET /api/meta/apps`, `POST /api/meta/apps` e `PUT /api/meta/apps/{alias}/secret` exigem sessão de administrador. A listagem retorna `redirect_uri` e `apps` com `alias`, `default`, `accounts`, `configured` e, nos apps adicionais, `instagram_client_id`. O cadastro recebe `instagram_client_id` e `instagram_client_secret` como strings e retorna o `alias` gerado. A troca recebe apenas `instagram_client_secret` e retorna `ok`.
+
+A ponte pública `GET /api/meta/connect` e o backend `GET /api/meta/oauth/start` aceitam `app`. O padrão é `app-1`. `GET /api/meta/oauth/url` também aceita `app` e retorna a URL de autorização. Quando recebe `account_id`, exige sessão administrativa e escolhe o app já vinculado à conta. O callback continua recebendo o código e o estado do Instagram. `GET /api/meta/accounts` acrescenta `meta_app: str` com o apelido público. Consulte [Contas, OAuth e credenciais](contas_oauth.md#apps-meta-e-links-por-app--09112026).
 
 ## Limite de Reels — 04/11/2026
 

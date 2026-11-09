@@ -10,6 +10,20 @@ test('connect relays directly to Instagram without following authorization',asyn
  globalThis.fetch=async(u,o)=>{assert.equal(u,'https://synthetic.invalid/api/meta/oauth/start');assert.equal(o.redirect,'manual');return new Response(null,{status:307,headers:{location:'https://www.instagram.com/oauth/authorize?state=synthetic'}})};
  const r=response();await connect({},r);assert.equal(r.code,302);assert.match(r.location,/^https:\/\/www.instagram.com\//);assert.equal(r.headers['Cache-Control'],'no-store');
 });
+test('connect forwards the selected app and reports unknown apps',async()=>{
+ globalThis.fetch=async(url)=>{
+  assert.equal(url,'https://synthetic.invalid/api/meta/oauth/start?app=app-2');
+  return new Response('private detail',{status:404});
+ };
+ const r=response();await connect({query:{app:'app-2',secret:'ignored'}},r);
+ assert.equal(r.code,404);assert.equal(r.body.detail,'App Meta não encontrado.');
+});
+test('connect rejects ambiguous or malformed app selectors',async()=>{
+ globalThis.fetch=async()=>assert.fail('Unexpected upstream request');
+ for (const app of [['app-1','app-2'],'app-02','']) {
+  const r=response();await connect({query:{app}},r);assert.equal(r.code,400);
+ }
+});
 test('connect rejects unrelated redirects and does not expose upstream detail',async()=>{
  globalThis.fetch=async()=>new Response('secret synthetic detail',{status:302,headers:{location:'https://untrusted.invalid'}});
  const r=response();await connect({},r);assert.equal(r.code,502);assert.ok(!JSON.stringify(r).includes('secret'));

@@ -28,6 +28,7 @@ import "./library.css";
 import "./accounts.css";
 
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
+const directInstagramConnectionUrl = "https://connect.hotvinci.cfd/api/meta/connect";
 const apiUrl = (path: string) => `${apiBaseUrl}/api${path}`;
 const api = (path: string, options?: RequestInit) => {
   const effectivePath =
@@ -681,7 +682,6 @@ function App() {
     else if (targets.length > 1)
       setNotice(`${opened} contas aptas: uma aba foi aberta para cada conta.`);
   };
-  const directInstagramConnectionUrl = "https://connect.hotvinci.cfd/api/meta/connect";
   const copyInstagramConnectionLink = async () => {
     try {
       await navigator.clipboard.writeText(directInstagramConnectionUrl);
@@ -1230,6 +1230,7 @@ function App() {
         )}
         {page === "Configurações" && settingsReady && (
           <>
+            <MetaAppsSettings />
             <div className="panel defaults-panel">
               <div className="panel-heading"><div>
                 <h2>Limite de Reels por conta</h2>
@@ -2496,6 +2497,103 @@ function InsightsPage({
     </>
   );
 }
+type MetaAppEntry = {
+  alias: string;
+  default: boolean;
+  accounts: number;
+  configured: boolean;
+  instagram_client_id?: string;
+};
+
+function MetaAppsSettings() {
+  const [data, setData] = useState<{ apps: MetaAppEntry[]; redirect_uri: string }>();
+  const [editing, setEditing] = useState<string>();
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const load = async () => {
+    setError("");
+    try { setData(await api("/meta/apps")); }
+    catch { setError("Não foi possível carregar os Apps Meta."); }
+  };
+  useEffect(() => { void load(); }, []);
+  const save = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const fields = new FormData(form);
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      const result = await api(editing ? `/meta/apps/${editing}/secret` : "/meta/apps", {
+        method: editing ? "PUT" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(Object.fromEntries(fields)),
+      });
+      form.reset();
+      setMessage(editing ? `Secret de ${editing} atualizado.` : `${result.alias} cadastrado.`);
+      setEditing(undefined);
+      await load();
+    } catch (failure) {
+      let detail: unknown;
+      try { detail = JSON.parse((failure as Error).message).detail; } catch { /* resposta sem JSON */ }
+      setError(typeof detail === "string" ? detail : "Não foi possível salvar o App Meta.");
+    } finally { setBusy(false); }
+  };
+  return (
+    <div className="panel defaults-panel">
+      <div className="panel-heading"><div>
+        <h2>Apps Meta</h2>
+        <p>Use o link de cada app para escolher onde conectar novas contas do Instagram.</p>
+      </div></div>
+      {data ? <>
+        <div className="defaults-grid"><label>
+          Endereço de retorno para cadastrar no Instagram Login de cada app
+          <input readOnly value={data.redirect_uri} onFocus={(event) => event.currentTarget.select()} />
+        </label></div>
+        <div className="account-list">
+          {data.apps.map((item) => (
+            <div className="account-choice" key={item.alias}>
+              <div className="account-details">
+                <b>{item.alias}{item.default ? " · Padrão" : ""}</b>
+                <small>{item.accounts} conta(s) vinculada(s){item.instagram_client_id ? ` · ID ${item.instagram_client_id}` : ""}</small>
+                {!item.configured && <small>Aguardando configuração do servidor.</small>}
+              </div>
+              <span className="row-actions">
+                <button type="button" disabled={!item.configured} onClick={async () => {
+                  setError("");
+                  try {
+                    await navigator.clipboard.writeText(`${directInstagramConnectionUrl}?app=${item.alias}`);
+                    setMessage(`Link de ${item.alias} copiado.`);
+                  } catch { setError("Não foi possível copiar o link."); }
+                }}>Copiar link</button>
+                {!item.default && <button type="button" disabled={busy} onClick={() => setEditing(item.alias)}>Trocar secret</button>}
+              </span>
+            </div>
+          ))}
+        </div>
+        <form key={editing || "add"} onSubmit={save}>
+          <h3>{editing ? `Trocar secret de ${editing}` : "Adicionar app"}</h3>
+          <div className="defaults-grid">
+            {!editing && <label>Instagram App ID
+              <input name="instagram_client_id" inputMode="numeric" pattern="[0-9]+" maxLength={100} required disabled={busy} />
+            </label>}
+            <label>Instagram App Secret
+              <input name="instagram_client_secret" type="password" autoComplete="new-password" maxLength={500} required disabled={busy} />
+            </label>
+          </div>
+          <div className="modal-actions">
+            {editing && <button type="button" disabled={busy} onClick={() => setEditing(undefined)}>Cancelar</button>}
+            <button className="primary" disabled={busy}>{busy ? "Salvando..." : "Salvar app"}</button>
+          </div>
+        </form>
+      </> : error ? <button type="button" onClick={load}>Tentar novamente</button> : <p>Carregando Apps Meta...</p>}
+      {error && <p role="alert">{error}</p>}
+      {message && <p role="status">{message}</p>}
+    </div>
+  );
+}
+
 function AccountsPage({
   accounts: allAccounts,
   connectionUrl,
@@ -2516,12 +2614,29 @@ function AccountsPage({
     .sort(newestFirst);
   const archived = allAccounts.filter((account: any) => account.reel_limit_reached)
     .sort(newestFirst);
+  const unavailable = allAccounts.filter((account: any) => !account.apta && !account.reel_limit_reached)
+    .sort(newestFirst);
   const [selectedIdsState, setSelectedIds] = useState<number[]>([]);
   const selectedIds = selectedIdsState.filter((id) => accounts.some((account: any) => account.id === id));
   const [delay, setDelay] = useState("1");
   const [groupTitle, setGroupTitle] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const reconnect = async (id: number) => {
+    setError("");
+    const tab = window.open("", "_blank");
+    if (!tab) {
+      setError("Permita pop-ups para abrir a reconexão do Instagram.");
+      return;
+    }
+    try {
+      const { url } = await api(`/meta/oauth/url?account_id=${id}`);
+      tab.location.replace(url);
+    } catch {
+      tab.close();
+      setError("Não foi possível abrir a reconexão pelo app vinculado.");
+    }
+  };
   const save = async (ids: number[], values: any) => {
     setSaving(true); setError("");
     try { await savePreferences(ids, values); }
@@ -2567,7 +2682,7 @@ function AccountsPage({
         <small>{account.published_reels ?? 0} Reels publicados pelo Rmanager{account.reel_limit ? ` / limite de ${account.reel_limit}` : " · Sem limite"}
           {account.reel_limit_reached ? " · LIMITE ATINGIDO — publicações e entrada em campanhas bloqueadas" : ""}</small>
         {isArchived && account.account_group && <small>Grupo: {account.account_group}</small>}
-        <small>Vinculada via OAuth em: {account.conectada_em ? eventDate(account.conectada_em) : "Data não disponível"}</small>
+        <small>{account.meta_app || "app-1"} · Vinculada em {account.conectada_em ? eventDate(account.conectada_em) : "data não disponível"}</small>
         <small>Postar após {account.effective_delay_days} dia(s) da vinculação · {account.posting_delay_days == null ? "Padrão global" : "Prazo da conta"}
           {account.sincronizacao_devida_em ? ` · Liberada em ${eventDate(account.sincronizacao_devida_em)}` : ""}
         </small>
@@ -2592,6 +2707,7 @@ function AccountsPage({
             <ArrowUpRight size={18} />
           </button>
         )}
+        <button type="button" onClick={() => reconnect(account.id)}>Reconectar</button>
         <button className="danger" onClick={() => remove(account)}>
           Excluir
         </button>
@@ -2672,7 +2788,21 @@ function AccountsPage({
           {!!healthy.length && <><h3>Contas aptas</h3><div className="account-list">{healthy.map((account: any) => render(account))}</div></>}
         </section>;
       })}
-      {!accounts.length && <Empty text="Nenhuma conta disponível para publicar. Contas no limite estão em Arquivadas; demais contas com erro estão ocultas." />}
+      {!accounts.length && <Empty text="Nenhuma conta disponível para publicar." />}
+      {!!unavailable.length && <details className="account-group">
+        <summary>Contas indisponíveis ({unavailable.length})</summary>
+        <div className="account-list">
+          {unavailable.map((account: any) => (
+            <div className="account-choice" key={account.id}>
+              <div className="account-details">
+                <b>@{account.username || account.nome}</b>
+                <small>{account.meta_app || "app-1"} · {account.status}</small>
+              </div>
+              <button type="button" onClick={() => reconnect(account.id)}>Reconectar</button>
+            </div>
+          ))}
+        </div>
+      </details>}
       <section className="account-group accounts-archive" aria-label="Contas arquivadas">
         <h2>Arquivadas ({archived.length})</h2>
         <p className="muted">Contas que atingiram o limite de Reels. Não publicam nem entram em novas campanhas enquanto estiverem no limite.</p>

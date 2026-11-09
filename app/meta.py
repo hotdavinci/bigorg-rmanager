@@ -26,14 +26,15 @@ def safe_meta_error(response: httpx.Response) -> str:
         raw=re.sub(r"(?i)(access_token|client_secret|code)=?[^&\\s\"']+",r"\1=OCULTO",response.text or "").strip()
         return f"Meta respondeu HTTP {response.status_code} ao trocar o código OAuth. Resposta: {raw[:700] or 'vazia'}"
 
-def require_config() -> None:
-    if not (settings.meta_instagram_app_id or settings.meta_app_id) or not (settings.meta_instagram_app_secret or settings.meta_app_secret) or not settings.meta_graph_api_version:
-        raise HTTPException(503, "Preencha META_INSTAGRAM_APP_ID, META_INSTAGRAM_APP_SECRET e META_GRAPH_API_VERSION no arquivo .env")
-    if not settings.app_encryption_key:
-        raise HTTPException(503, "Gere a APP_ENCRYPTION_KEY com o arquivo 'Gerar chave de proteção.vbs'")
+def default_client_id() -> str:
+    return settings.meta_instagram_app_id or settings.meta_app_id
+
+def default_client_secret() -> str:
+    return settings.meta_instagram_app_secret or settings.meta_app_secret
 
 def cipher() -> Fernet:
-    require_config()
+    if not settings.app_encryption_key:
+        raise HTTPException(503, "Gere a APP_ENCRYPTION_KEY com o arquivo 'Gerar chave de proteção.vbs'")
     try: return Fernet(settings.app_encryption_key.encode())
     except (ValueError, TypeError): raise HTTPException(503, "APP_ENCRYPTION_KEY inválida")
 
@@ -42,18 +43,13 @@ def decrypt(value: str) -> str:
     try: return cipher().decrypt(value.encode()).decode()
     except InvalidToken: raise HTTPException(500, "Não foi possível ler o token armazenado")
 
-def authorization_url(state: str) -> str:
-    require_config()
-    client_id=settings.meta_instagram_app_id or settings.meta_app_id
+def authorization_url(state: str, client_id: str, redirect_uri: str) -> str:
     # Match the Business Login URL emitted by the Meta dashboard.  In
     # particular, force_reauth is the current documented flag for this flow.
-    return str(httpx.URL(settings.meta_oauth_authorize_url).copy_merge_params({"force_reauth":"true","client_id":client_id,"redirect_uri":settings.meta_redirect_uri,"response_type":"code","scope":SCOPES,"state":state}))
+    return str(httpx.URL(settings.meta_oauth_authorize_url).copy_merge_params({"force_reauth":"true","client_id":client_id,"redirect_uri":redirect_uri,"response_type":"code","scope":SCOPES,"state":state}))
 
-async def exchange_code(code: str) -> tuple[str, datetime|None]:
-    require_config()
+async def exchange_code(code: str, client_id: str, secret: str, redirect_uri: str) -> tuple[str, datetime|None]:
     async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
-        client_id=settings.meta_instagram_app_id or settings.meta_app_id
-        secret=settings.meta_instagram_app_secret or settings.meta_app_secret
         # The Instagram Login token endpoint expects multipart/form-data.  A
         # urlencoded body can be accepted by the edge but later fail with the
         # misleading "Error validating verification code" response.
@@ -61,10 +57,11 @@ async def exchange_code(code: str) -> tuple[str, datetime|None]:
             "client_id": (None, client_id),
             "client_secret": (None, secret),
             "grant_type": (None, "authorization_code"),
-            "redirect_uri": (None, settings.meta_redirect_uri),
+            "redirect_uri": (None, redirect_uri),
             "code": (None, code),
         })
-        if response.is_error: raise HTTPException(400, safe_meta_error(response))
+        if response.is_error:
+            raise HTTPException(400, "A Meta recusou o código de autorização. Confira a configuração do app e tente novamente.")
         short = response.json().get("access_token")
         if not short: raise HTTPException(400, "A Meta não retornou um token de acesso")
         long = await client.get(f"{settings.meta_graph_base_url}/access_token", params={"grant_type":"ig_exchange_token","client_secret":secret,"access_token":short})
