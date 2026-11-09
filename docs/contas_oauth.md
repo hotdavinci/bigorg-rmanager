@@ -2,7 +2,7 @@
 
 ## Resumo
 
-Cadastro de apps Meta, links e reconexão por app, ponte OAuth para proxies, tokens, seleção e exclusão de contas, grupos, prazos e arquivamento por limite de Reels. Consulte ao alterar as telas de Contas e Apps Meta, a autenticação ou os callbacks.
+Cadastro de apps Meta, Instagram Login e Unified Login, links e reconexão por app, ponte OAuth para proxies, tokens, seleção e exclusão de contas, grupos, prazos e arquivamento por limite de Reels. Consulte ao alterar as telas de Contas e Apps Meta, a autenticação ou os callbacks.
 
 ## Apps Meta e links por app — 09/11/2026
 
@@ -13,6 +13,14 @@ O link público `/api/meta/connect?app=app-2` inicia o OAuth pelo segundo app. S
 A conta guarda o app que concluiu sua conexão. A ação **Reconectar** abre a autorização pelo app vinculado e exige o mesmo perfil. Contas legadas sem vínculo explícito usam `app-1` na reconexão. Esse padrão de compatibilidade não identifica retroativamente o emissor de tokens antigos. Contas com erro fora de Arquivadas aparecem na seção recolhida **Contas indisponíveis**, com a ação de reconectar. Uma autorização por outro app não substitui o vínculo de uma conta já reconhecida. Se o identificador mudar entre apps, o callback também recusa a criação quando encontra o mesmo nome de usuário em outro app.
 
 O SQLite adiciona a tabela de apps e campos opcionais nas contas e estados OAuth na inicialização. Tokens e registros anteriores são preservados. Links de autorização pendentes emitidos pela versão anterior precisam ser gerados novamente após a atualização.
+
+### Unified Login para apps adicionais
+
+O cadastro e a opção **Editar login** permitem escolher **Unified Login**. Para o `app-2` já cadastrado e ainda sem contas, use o Meta App ID, o Meta App Secret e o Configuration ID da configuração salva no painel da Meta. Cadastre ali o mesmo endereço de retorno exibido pelo Rmanager. O link público continua com `?app=app-2`. O `app-1` usa a configuração legada do servidor.
+
+No Unified Login, o callback troca o código pelo token de usuário do sistema e consulta as contas profissionais compartilhadas. Uma nova conexão exige que seja compartilhada somente a conta desejada. A reconexão procura a conta já vinculada entre as compartilhadas. O tipo de token registrado na conta define o host de perfil, publicação e métricas. Unified Login usa `graph.facebook.com` e Instagram Login usa o host legado. Alterar o tipo de login ou o ID de um app que já tem histórico de contas exige uma migração planejada com nova autorização. O painel permite atualizar somente o secret desses apps.
+
+A configuração Meta deve autorizar leitura de perfil, publicação e insights conforme os recursos utilizados. Consulte [Configuração do Unified Login na Meta](https://developers.facebook.com/documentation/instagram-platform/instagram-api-with-unified-login/get-started).
 
 ## Contas com limite atingido — 04/11/2026
 

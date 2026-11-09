@@ -2503,11 +2503,14 @@ type MetaAppEntry = {
   accounts: number;
   configured: boolean;
   instagram_client_id?: string;
+  unified_config_id?: string | null;
+  can_edit_login?: boolean;
 };
 
 function MetaAppsSettings() {
   const [data, setData] = useState<{ apps: MetaAppEntry[]; redirect_uri: string }>();
-  const [editing, setEditing] = useState<string>();
+  const [editing, setEditing] = useState<{ item: MetaAppEntry; secretOnly: boolean }>();
+  const [unified, setUnified] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -2525,20 +2528,28 @@ function MetaAppsSettings() {
     setError("");
     setMessage("");
     try {
-      const result = await api(editing ? `/meta/apps/${editing}/secret` : "/meta/apps", {
+      const path = editing
+        ? `/meta/apps/${editing.item.alias}/${editing.secretOnly ? "secret" : "login"}`
+        : "/meta/apps";
+      const result = await api(path, {
         method: editing ? "PUT" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(Object.fromEntries(fields)),
       });
       form.reset();
-      setMessage(editing ? `Secret de ${editing} atualizado.` : `${result.alias} cadastrado.`);
+      setMessage(editing ? `${editing.item.alias} atualizado.` : `${result.alias} cadastrado.`);
       setEditing(undefined);
+      setUnified(false);
       await load();
     } catch (failure) {
       let detail: unknown;
       try { detail = JSON.parse((failure as Error).message).detail; } catch { /* resposta sem JSON */ }
       setError(typeof detail === "string" ? detail : "Não foi possível salvar o App Meta.");
     } finally { setBusy(false); }
+  };
+  const edit = (item: MetaAppEntry, secretOnly: boolean) => {
+    setEditing({ item, secretOnly });
+    setUnified(Boolean(item.unified_config_id));
   };
   return (
     <div className="panel defaults-panel">
@@ -2548,7 +2559,7 @@ function MetaAppsSettings() {
       </div></div>
       {data ? <>
         <div className="defaults-grid"><label>
-          Endereço de retorno para cadastrar no Instagram Login de cada app
+          Endereço de retorno para cadastrar no painel da Meta
           <input readOnly value={data.redirect_uri} onFocus={(event) => event.currentTarget.select()} />
         </label></div>
         <div className="account-list">
@@ -2556,6 +2567,7 @@ function MetaAppsSettings() {
             <div className="account-choice" key={item.alias}>
               <div className="account-details">
                 <b>{item.alias}{item.default ? " · Padrão" : ""}</b>
+                <small>{item.unified_config_id ? "Unified Login" : "Instagram Login"}</small>
                 <small>{item.accounts} conta(s) vinculada(s){item.instagram_client_id ? ` · ID ${item.instagram_client_id}` : ""}</small>
                 {!item.configured && <small>Aguardando configuração do servidor.</small>}
               </div>
@@ -2567,23 +2579,36 @@ function MetaAppsSettings() {
                     setMessage(`Link de ${item.alias} copiado.`);
                   } catch { setError("Não foi possível copiar o link."); }
                 }}>Copiar link</button>
-                {!item.default && <button type="button" disabled={busy} onClick={() => setEditing(item.alias)}>Trocar secret</button>}
+                {item.can_edit_login && <button type="button" disabled={busy} onClick={() => edit(item, false)}>Editar login</button>}
+                {!item.default && <button type="button" disabled={busy} onClick={() => edit(item, true)}>Trocar secret</button>}
               </span>
             </div>
           ))}
         </div>
-        <form key={editing || "add"} onSubmit={save}>
-          <h3>{editing ? `Trocar secret de ${editing}` : "Adicionar app"}</h3>
+        <form key={editing ? `${editing.item.alias}-${editing.secretOnly}` : "add"} onSubmit={save}>
+          <h3>{editing ? `${editing.secretOnly ? "Trocar secret de" : "Editar login de"} ${editing.item.alias}` : "Adicionar app"}</h3>
           <div className="defaults-grid">
-            {!editing && <label>Instagram App ID
-              <input name="instagram_client_id" inputMode="numeric" pattern="[0-9]+" maxLength={100} required disabled={busy} />
-            </label>}
-            <label>Instagram App Secret
+            {!editing?.secretOnly && <>
+              <label>Tipo de login
+                <select value={unified ? "unified" : "instagram"} disabled={busy} onChange={(event) => setUnified(event.target.value === "unified")}>
+                  <option value="instagram">Instagram Login</option>
+                  <option value="unified">Unified Login</option>
+                </select>
+              </label>
+              <label>{unified ? "Meta App ID" : "Instagram App ID"}
+                <input name="instagram_client_id" defaultValue={editing?.item.instagram_client_id} inputMode="numeric" pattern="[0-9]+" maxLength={100} required disabled={busy} />
+              </label>
+              {unified && <label>Configuration ID
+                <input name="unified_config_id" defaultValue={editing?.item.unified_config_id ?? ""} inputMode="numeric" pattern="[0-9]+" maxLength={100} required disabled={busy} />
+                <small>Use o ID da configuração de Unified Login salva no painel da Meta.</small>
+              </label>}
+            </>}
+            <label>{unified ? "Meta App Secret" : "Instagram App Secret"}
               <input name="instagram_client_secret" type="password" autoComplete="new-password" maxLength={500} required disabled={busy} />
             </label>
           </div>
           <div className="modal-actions">
-            {editing && <button type="button" disabled={busy} onClick={() => setEditing(undefined)}>Cancelar</button>}
+            {editing && <button type="button" disabled={busy} onClick={() => { setEditing(undefined); setUnified(false); }}>Cancelar</button>}
             <button className="primary" disabled={busy}>{busy ? "Salvando..." : "Salvar app"}</button>
           </div>
         </form>
