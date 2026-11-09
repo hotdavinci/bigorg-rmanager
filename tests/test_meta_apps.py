@@ -206,3 +206,37 @@ def test_unified_graph_routes_and_account_selection(monkeypatch):
 
     asyncio.run(verify())
     assert calls[-3:] == ["/v99.0/909/media", "/v99.0/123", "/v99.0/909/media_publish"]
+
+
+def test_default_unified_keeps_legacy_reconnection(panel, monkeypatch):
+    client, sessions = panel
+    login(client)
+    with sessions() as session:
+        legacy = InstagramAccount(meta_account_id="77", username="legacy", encrypted_token="existing")
+        session.add(legacy)
+        session.commit()
+        legacy_id = legacy.id
+    payload = {"instagram_client_id": "505", "instagram_client_secret": "synthetic", "unified_config_id": "606"}
+    assert client.put("/api/meta/apps/app-1/login", json=payload).status_code == 200
+    assert client.post("/api/meta/apps", json=app_payload()).json() == {"alias": "app-2"}
+    implicit = params(client.get("/api/meta/oauth/start").headers["location"])
+    explicit = params(client.get("/api/meta/oauth/start?app=app-1").headers["location"])
+    assert implicit["config_id"] == explicit["config_id"] == ["606"]
+    legacy_url = client.get("/api/meta/oauth/url", params={"account_id": legacy_id}).json()["url"]
+    assert urlparse(legacy_url).hostname == "www.instagram.com"
+    assert params(legacy_url)["client_id"] == ["101"]
+
+    monkeypatch.setattr(meta, "exchange_unified_code", AsyncMock(return_value=("token", None)))
+    monkeypatch.setattr(meta, "unified_account_id", AsyncMock(return_value="88"))
+    monkeypatch.setattr(meta, "profile", AsyncMock(return_value={"account_id": "88", "username": "unified"}))
+    assert client.get("/api/meta/oauth/callback", params={"state": implicit["state"][0], "code": "new"}).status_code == 200
+    with sessions() as session:
+        new = session.scalar(select(InstagramAccount).where(InstagramAccount.meta_account_id == "88"))
+        assert new.meta_app_id == 0
+        assert session.get(InstagramAccount, legacy_id).meta_app_id is None
+        new_id = new.id
+    new_url = client.get("/api/meta/oauth/url", params={"account_id": new_id}).json()["url"]
+    assert params(new_url)["config_id"] == ["606"]
+    apps = client.get("/api/meta/apps").json()["apps"]
+    assert [app["alias"] for app in apps] == ["app-1", "app-2"]
+    assert apps[0]["accounts"] == 2

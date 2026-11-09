@@ -4,13 +4,9 @@
 
 Cadastro de apps Meta, Instagram Login e Unified Login, links e reconexão por app, ponte OAuth para proxies, tokens, seleção e exclusão de contas, grupos, prazos e arquivamento por limite de Reels. Consulte ao alterar as telas de Contas e Apps Meta, a autenticação ou os callbacks.
 
-## Páginas públicas para a Meta
-
-Os campos de Política de Privacidade e Termos de Serviço no painel Meta apontam, respectivamente, para [Privacidade](https://connect.hotvinci.cfd/privacidade) e [Termos](https://connect.hotvinci.cfd/termos). A política inclui o canal para pedidos de exclusão de dados. A Vercel serve as duas páginas estáticas sem sessão do painel.
-
 ## Apps Meta e links por app — 09/11/2026
 
-Em **Configurações → Apps Meta**, o administrador cadastra o Instagram App ID e o Instagram App Secret dos apps adicionais, consulta a contagem de contas vinculadas e copia o link de cada app. O cadastro numera os apps a partir de `app-2`. O `app-1` representa o app padrão da configuração legada. O secret de um app adicional pode ser substituído no painel e fica criptografado com a mesma chave Fernet dos tokens. O endereço de retorno exibido no painel deve ser autorizado no Instagram Login de cada app.
+Em **Configurações → Apps Meta**, o administrador configura credenciais, consulta a contagem de contas vinculadas e copia o link de cada app. O cadastro numera os apps adicionais a partir de `app-2`. O `app-1` é o padrão e usa a configuração legada até receber uma configuração de Unified Login. Os secrets cadastrados no painel podem ser substituídos e ficam criptografados com a mesma chave Fernet dos tokens. O endereço de retorno exibido no painel deve ser autorizado na Meta.
 
 O link público `/api/meta/connect?app=app-2` inicia o OAuth pelo segundo app. Sem parâmetro, vale `app-1`. A ponte encaminha o apelido ao backend, que vincula a escolha ao estado de uso único, válido por 15 minutos. O callback resolve as credenciais no servidor com base nesse estado. Para direcionar novas contas quando um app lotar, o operador passa a compartilhar o link do próximo app.
 
@@ -18,9 +14,9 @@ A conta guarda o app que concluiu sua conexão. A ação **Reconectar** abre a a
 
 O SQLite adiciona a tabela de apps e campos opcionais nas contas e estados OAuth na inicialização. Tokens e registros anteriores são preservados. Links de autorização pendentes emitidos pela versão anterior precisam ser gerados novamente após a atualização.
 
-### Unified Login para apps adicionais
+### Unified Login
 
-O cadastro e a opção **Editar login** permitem escolher **Unified Login**. Para o `app-2` já cadastrado e ainda sem contas, use o Meta App ID, o Meta App Secret e o Configuration ID da configuração salva no painel da Meta. Cadastre ali o mesmo endereço de retorno exibido pelo Rmanager. O link público continua com `?app=app-2`. O `app-1` usa a configuração legada do servidor.
+O cadastro e a opção **Editar login** permitem escolher **Unified Login**. Use o Meta App ID, o Meta App Secret e o Configuration ID da configuração salva no painel da Meta. Cadastre ali o mesmo endereço de retorno exibido pelo Rmanager. No `app-1`, a configuração passa a valer para novas conexões pelo link padrão, com ou sem `?app=app-1`. As contas legadas continuam usando o token existente e o Instagram Login para reconectar. A configuração do servidor continua necessária para essas reconexões.
 
 No Unified Login, o callback troca o código pelo token de usuário do sistema e consulta as contas profissionais compartilhadas. Uma nova conexão exige que seja compartilhada somente a conta desejada. A reconexão procura a conta já vinculada entre as compartilhadas. O tipo de token registrado na conta define o host de perfil, publicação e métricas. Unified Login usa `graph.facebook.com` e Instagram Login usa o host legado. Alterar o tipo de login ou o ID de um app que já tem histórico de contas exige uma migração planejada com nova autorização. O painel permite atualizar somente o secret desses apps.
 

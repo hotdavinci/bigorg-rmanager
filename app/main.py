@@ -1017,7 +1017,8 @@ def oauth_url(request:Request,app:str|None=None,account_id:int|None=None,s:Sessi
     account=s.get(InstagramAccount,account_id)
     if not account or account.deleted_at is not None:
         raise HTTPException(404,"Conta não encontrada.")
-    return {"url":create_meta_oauth_url(s,meta_app_alias(account.meta_app_id),account_id)}
+    return {"url":create_meta_oauth_url(s,meta_app_alias(account.meta_app_id),account_id,
+                                       legacy_default=account.meta_app_id is None)}
 
 def require_meta_admin(request:Request) -> None:
     if not settings.admin_password or request.session.get("user") != settings.admin_email:
@@ -1026,18 +1027,20 @@ def require_meta_admin(request:Request) -> None:
 def meta_app_alias(app_id:int|None) -> str:
     return f"app-{app_id+1}" if app_id is not None else "app-1"
 
+DEFAULT_UNIFIED_APP_ID = 0
+
 def find_meta_app(s:Session,alias:str) -> MetaApp|None:
     if alias == "app-1":
-        return None
+        return s.get(MetaApp,DEFAULT_UNIFIED_APP_ID)
     if re.fullmatch(r"app-[1-9][0-9]{0,17}",alias):
         item=s.get(MetaApp,int(alias[4:])-1)
         if item:
             return item
     raise HTTPException(404,"App Meta não encontrado.")
 
-def create_meta_oauth_url(s:Session,alias:str,account_id:int|None=None) -> str:
+def create_meta_oauth_url(s:Session,alias:str,account_id:int|None=None,*,legacy_default:bool=False) -> str:
     reload_runtime_settings()
-    item=find_meta_app(s,alias)
+    item=None if legacy_default else find_meta_app(s,alias)
     client_id=item.instagram_client_id if item else meta.default_client_id()
     if not client_id or (item is None and not meta.default_client_secret()) or not settings.meta_graph_api_version:
         raise HTTPException(503,"App Meta ainda não configurado para conexão.")
@@ -1057,14 +1060,19 @@ def list_meta_apps(s:Session=Depends(db)):
     counts=dict(s.execute(select(InstagramAccount.meta_app_id,func.count()).where(
         InstagramAccount.deleted_at.is_(None)).group_by(InstagramAccount.meta_app_id)).all())
     linked_apps=set(s.scalars(select(InstagramAccount.meta_app_id).distinct()))
+    default=s.get(MetaApp,DEFAULT_UNIFIED_APP_ID)
     return {
         "redirect_uri":settings.meta_redirect_uri,
-        "apps":[{"alias":"app-1","default":True,"accounts":counts.get(None,0),
-                 "configured":bool(meta.default_client_id() and meta.default_client_secret())}]
+        "apps":[{"alias":"app-1","default":True,
+                 "accounts":counts.get(None,0)+counts.get(DEFAULT_UNIFIED_APP_ID,0),
+                 "configured":bool(default or (meta.default_client_id() and meta.default_client_secret())),
+                 "instagram_client_id":default.instagram_client_id if default else None,
+                 "unified_config_id":default.unified_config_id if default else None,
+                 "can_edit_login":DEFAULT_UNIFIED_APP_ID not in linked_apps}]
                + [{"alias":meta_app_alias(item.id),"default":False,"accounts":counts.get(item.id,0),
                    "configured":True,"instagram_client_id":item.instagram_client_id,
                    "unified_config_id":item.unified_config_id,"can_edit_login":item.id not in linked_apps}
-                  for item in s.scalars(select(MetaApp).order_by(MetaApp.id))],
+                  for item in s.scalars(select(MetaApp).where(MetaApp.id!=DEFAULT_UNIFIED_APP_ID).order_by(MetaApp.id))],
     }
 
 def encrypt_meta_app_secret(body:dict) -> str:
@@ -1078,7 +1086,7 @@ def save_meta_app_login(item:MetaApp,body:dict,s:Session) -> None:
     if not isinstance(client_id,str) or not re.fullmatch(r"[0-9]{1,100}",client_id.strip()):
         raise HTTPException(422,"Informe o App ID numérico.")
     client_id=client_id.strip()
-    if client_id == meta.default_client_id():
+    if item.id != DEFAULT_UNIFIED_APP_ID and client_id == meta.default_client_id():
         raise HTTPException(409,"Este App ID já está cadastrado como app padrão.")
     config_id=body.get("unified_config_id")
     if config_id is not None and (not isinstance(config_id,str) or not re.fullmatch(r"[0-9]{1,100}",config_id.strip())):
@@ -1103,8 +1111,10 @@ def add_meta_app(body:dict,s:Session=Depends(db)):
 def update_meta_app_login(alias:str,body:dict,s:Session=Depends(db)):
     s.connection().exec_driver_sql("BEGIN IMMEDIATE")
     item=find_meta_app(s,alias)
+    if alias == "app-1" and body.get("unified_config_id") is None:
+        raise HTTPException(422,"Informe a configuração de Unified Login do app padrão.")
     if item is None:
-        raise HTTPException(409,"O app padrão é gerenciado pela configuração do servidor.")
+        item=MetaApp(id=DEFAULT_UNIFIED_APP_ID)
     if s.scalar(select(InstagramAccount.id).where(InstagramAccount.meta_app_id==item.id).limit(1)) is not None:
         raise HTTPException(409,"A configuração de login de um app com contas vinculadas não pode ser alterada.")
     save_meta_app_login(item,body,s)

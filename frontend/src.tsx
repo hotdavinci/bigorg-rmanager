@@ -2549,7 +2549,7 @@ function MetaAppsSettings() {
   };
   const edit = (item: MetaAppEntry, secretOnly: boolean) => {
     setEditing({ item, secretOnly });
-    setUnified(Boolean(item.unified_config_id));
+    setUnified(item.default || Boolean(item.unified_config_id));
   };
   return (
     <div className="panel defaults-panel">
@@ -2580,17 +2580,18 @@ function MetaAppsSettings() {
                   } catch { setError("Não foi possível copiar o link."); }
                 }}>Copiar link</button>
                 {item.can_edit_login && <button type="button" disabled={busy} onClick={() => edit(item, false)}>Editar login</button>}
-                {!item.default && <button type="button" disabled={busy} onClick={() => edit(item, true)}>Trocar secret</button>}
+                {(!item.default || item.unified_config_id) && <button type="button" disabled={busy} onClick={() => edit(item, true)}>Trocar secret</button>}
               </span>
             </div>
           ))}
         </div>
         <form key={editing ? `${editing.item.alias}-${editing.secretOnly}` : "add"} onSubmit={save}>
           <h3>{editing ? `${editing.secretOnly ? "Trocar secret de" : "Editar login de"} ${editing.item.alias}` : "Adicionar app"}</h3>
+          {editing?.item.default && !editing.secretOnly && <p>Esta configuração vale para novas conexões. Contas vinculadas pelo Instagram Login continuam reconectando pelo fluxo original.</p>}
           <div className="defaults-grid">
             {!editing?.secretOnly && <>
               <label>Tipo de login
-                <select value={unified ? "unified" : "instagram"} disabled={busy} onChange={(event) => setUnified(event.target.value === "unified")}>
+                <select value={unified ? "unified" : "instagram"} disabled={busy || editing?.item.default} onChange={(event) => setUnified(event.target.value === "unified")}>
                   <option value="instagram">Instagram Login</option>
                   <option value="unified">Unified Login</option>
                 </select>
